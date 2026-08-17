@@ -1,6 +1,7 @@
 import React, {
   createContext,
   useContext,
+  useEffect,
   useState,
 } from 'react';
 
@@ -11,6 +12,7 @@ import {
   AnswerFeedback,
   SubmitAnswerResponse,
   SessionStatsResponse,
+  QuestionSetRecord,
 } from '../types';
 
 import {
@@ -55,6 +57,10 @@ interface InterviewContextType {
   prevQuestion: () => void;
   jumpToQuestion: (index: number) => void;
   resetSession: () => void;
+
+  activateQuestionSet: (
+    questionSet: QuestionSetRecord
+  ) => void;
 }
 
 const InterviewContext =
@@ -62,31 +68,117 @@ const InterviewContext =
     InterviewContextType | undefined
   >(undefined);
 
+const ACTIVE_QUESTION_SET_PREFIX =
+  'interviewai_active_question_set';
+
+function getActiveQuestionSetKey(
+  userId: string | null | undefined
+): string | null {
+  if (!userId || !userId.trim()) {
+    return null;
+  }
+
+  return `${ACTIVE_QUESTION_SET_PREFIX}_${userId}`;
+}
+
+function readStoredQuestionSet(
+  userId: string | null | undefined
+): QuestionSetRecord | null {
+  try {
+    const key =
+      getActiveQuestionSetKey(userId);
+
+    if (!key) {
+      return null;
+    }
+
+    const raw =
+      localStorage.getItem(key);
+
+    if (!raw) {
+      return null;
+    }
+
+    const parsed =
+      JSON.parse(raw);
+
+    if (
+      !parsed ||
+      !Array.isArray(parsed.questions) ||
+      parsed.questions.length === 0
+    ) {
+      return null;
+    }
+
+    return parsed as QuestionSetRecord;
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveQuestionSet(
+  userId: string | null | undefined,
+  questionSet: QuestionSetRecord
+): void {
+  try {
+    const key =
+      getActiveQuestionSetKey(userId);
+
+    if (!key) {
+      return;
+    }
+
+    localStorage.setItem(
+      key,
+      JSON.stringify(questionSet)
+    );
+  } catch {
+    return;
+  }
+}
+
+function removeActiveQuestionSet(
+  userId: string | null | undefined
+): void {
+  try {
+    const key =
+      getActiveQuestionSetKey(userId);
+
+    if (key) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    return;
+  }
+}
+
+function normalizeQuestionSetMode(
+  mode: 'self_based' | 'job_specific'
+): 'self_based' | 'role_based' {
+  return mode === 'job_specific'
+    ? 'role_based'
+    : 'self_based';
+}
+
 export const InterviewProvider: React.FC<{
   children: React.ReactNode;
 }> = ({ children }) => {
-
-  /*
-   * IMPORTANT:
-   *
-   * activeResumeProfile is treated as the source of truth for
-   * the resume currently selected for NEW interview preparation.
-   *
-   * activeResumeHash is kept as a compatibility fallback.
-   *
-   * resumes lets us verify that a hash actually belongs to one
-   * of the resumes currently stored for this user.
-   */
   const {
     activeResumeHash,
     activeResumeProfile,
     resumes,
+    user,
   } = useAuth();
+
+  const userId =
+    user?.id || null;
 
   const [
     questions,
     setQuestions,
-  ] = useState<InterviewQuestion[]>([]);
+  ] = useState<InterviewQuestion[]>(
+    []
+  );
 
   const [
     generationSummary,
@@ -143,30 +235,51 @@ export const InterviewProvider: React.FC<{
       null
     );
 
-  /*
-   * Stores the resume hash for which the current question set
-   * was generated.
-   *
-   * This prevents questions generated for Resume A from being
-   * accidentally used when the user has switched to Resume B.
-   */
   const [
     generatedForResumeHash,
     setGeneratedForResumeHash,
-  ] = useState<string | null>(null);
+  ] = useState<string | null>(
+    null
+  );
 
-  /*
-   * ==========================================================
-   * RESOLVE CURRENT RESUME
-   * ==========================================================
-   */
+  useEffect(() => {
+    if (!userId) {
+      setQuestions([]);
+      setGenerationSummary(null);
+      setGeneratedForResumeHash(null);
+      setCurrentSession(null);
+      setActiveQuestionIndex(0);
+      setActiveFeedback(null);
+      setActiveFollowUp(null);
+      setSessionStats(null);
+      return;
+    }
+
+    const stored =
+      readStoredQuestionSet(userId);
+
+    if (
+      stored &&
+      stored.questions.length > 0
+    ) {
+      setQuestions(
+        stored.questions
+      );
+
+      setGenerationSummary(
+        stored.generation_summary ||
+          null
+      );
+
+      setGeneratedForResumeHash(
+        stored.resume_hash ||
+          null
+      );
+    }
+  }, [userId]);
 
   const getCurrentResumeHash =
     (): string | null => {
-
-      /*
-       * Prefer the actual active profile.
-       */
       const profileHash =
         activeResumeProfile?.resume_hash;
 
@@ -174,9 +287,6 @@ export const InterviewProvider: React.FC<{
         return profileHash;
       }
 
-      /*
-       * Compatibility fallback.
-       */
       if (activeResumeHash) {
         return activeResumeHash;
       }
@@ -184,28 +294,17 @@ export const InterviewProvider: React.FC<{
       return null;
     };
 
-  /*
-   * ==========================================================
-   * VALIDATE RESUME HASH
-   * ==========================================================
-   */
-
   const requireResumeHash = (
     requestedHash?: string
   ): string => {
-
     const currentHash =
       getCurrentResumeHash();
 
-    /*
-     * If a specific hash was requested, validate it.
-     */
     if (requestedHash) {
-
       const existsInStoredResumes =
         resumes.length === 0 ||
         resumes.some(
-          (resume) =>
+          resume =>
             resume.resume_hash ===
             requestedHash
         );
@@ -219,24 +318,16 @@ export const InterviewProvider: React.FC<{
       return requestedHash;
     }
 
-    /*
-     * Otherwise use the actual currently selected resume.
-     */
     if (!currentHash) {
       throw new Error(
         'Please upload and select a resume before starting interview preparation.'
       );
     }
 
-    /*
-     * Make sure the current hash belongs to a stored resume.
-     *
-     * If the resume list has not loaded yet, allow it.
-     */
     const currentResumeExists =
       resumes.length === 0 ||
       resumes.some(
-        (resume) =>
+        resume =>
           resume.resume_hash ===
           currentHash
       );
@@ -250,11 +341,41 @@ export const InterviewProvider: React.FC<{
     return currentHash;
   };
 
-  /*
-   * ==========================================================
-   * GENERATE QUESTIONS
-   * ==========================================================
-   */
+  const activateQuestionSet = (
+    questionSet: QuestionSetRecord
+  ) => {
+    if (
+      !questionSet.questions ||
+      questionSet.questions.length === 0
+    ) {
+      return;
+    }
+
+    setQuestions(
+      questionSet.questions
+    );
+
+    setGenerationSummary(
+      questionSet.generation_summary ||
+        null
+    );
+
+    setGeneratedForResumeHash(
+      questionSet.resume_hash ||
+        null
+    );
+
+    setCurrentSession(null);
+    setActiveQuestionIndex(0);
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
+    setSessionStats(null);
+
+    saveActiveQuestionSet(
+      userId,
+      questionSet
+    );
+  };
 
   const generateQuestions = async (
     resumeHash?: string,
@@ -262,23 +383,22 @@ export const InterviewProvider: React.FC<{
     mode:
       | 'self_based'
       | 'job_specific' = 'self_based',
-    jdHash?: string | null,
+    jdHash?: string | null
   ): Promise<InterviewQuestion[]> => {
-
-    /*
-     * If a hash is explicitly supplied, validate it.
-     *
-     * Otherwise use the current active resume.
-     */
     const hash =
       requireResumeHash(
         resumeHash
       );
 
+    if (count <= 0) {
+      throw new Error(
+        'Question count must be greater than zero.'
+      );
+    }
+
     setIsGenerating(true);
 
     try {
-
       const response =
         await interviewApi.generateQuestions({
           resume_hash: hash,
@@ -286,6 +406,15 @@ export const InterviewProvider: React.FC<{
           mode,
           total_questions: count,
         });
+
+      if (
+        !response.questions ||
+        response.questions.length === 0
+      ) {
+        throw new Error(
+          'No interview questions were generated.'
+        );
+      }
 
       setQuestions(
         response.questions
@@ -295,50 +424,67 @@ export const InterviewProvider: React.FC<{
         response.generation_summary
       );
 
-      /*
-       * Remember which resume produced these questions.
-       */
       setGeneratedForResumeHash(
         hash
       );
 
-      /*
-       * A new generation starts a new preparation flow,
-       * so clear any previous session-specific state.
-       */
-      setCurrentSession(
-        null
-      );
+      setCurrentSession(null);
+      setActiveQuestionIndex(0);
+      setActiveFeedback(null);
+      setActiveFollowUp(null);
+      setSessionStats(null);
 
-      setActiveQuestionIndex(
-        0
-      );
+      const questionSetMode =
+        normalizeQuestionSetMode(
+          mode
+        );
 
-      setActiveFeedback(
-        null
-      );
+      const generatedSet:
+        QuestionSetRecord = {
+        id: `active_${Date.now()}_${hash}`,
 
-      setActiveFollowUp(
-        null
-      );
+        title:
+          questionSetMode ===
+          'role_based'
+            ? 'JD-Grounded Interview Questions'
+            : 'Comprehensive Resume Grounding',
 
-      setSessionStats(
-        null
+        mode:
+          questionSetMode,
+
+        date:
+          new Date().toISOString(),
+
+        questions_count:
+          response.questions.length,
+
+        difficulty:
+          'medium',
+
+        questions:
+          response.questions,
+
+        generation_summary:
+          response.generation_summary,
+
+        resume_hash:
+          hash,
+
+        jd_hash:
+          jdHash ||
+          undefined,
+      };
+
+      saveActiveQuestionSet(
+        userId,
+        generatedSet
       );
 
       return response.questions;
-
     } finally {
-
       setIsGenerating(false);
     }
   };
-
-  /*
-   * ==========================================================
-   * START SESSION
-   * ==========================================================
-   */
 
   const startSession = async (
     questionsToUse?: InterviewQuestion[],
@@ -347,22 +493,11 @@ export const InterviewProvider: React.FC<{
       | 'job_specific' = 'self_based',
     jdHash?: string | null,
     title?: string,
-    role?: string,
+    role?: string
   ): Promise<SessionResponse> => {
-
-    /*
-     * Always resolve the CURRENT selected resume when
-     * creating a new session.
-     *
-     * This is the critical fix.
-     */
     const currentHash =
       requireResumeHash();
 
-    /*
-     * Check whether the supplied question set was generated
-     * for the same resume.
-     */
     const questionsBelongToCurrentResume =
       generatedForResumeHash ===
       currentHash;
@@ -373,11 +508,7 @@ export const InterviewProvider: React.FC<{
         ? questionsToUse
         : [];
 
-    /*
-     * If there is no question set, generate one.
-     */
     if (!qs.length) {
-
       qs =
         await generateQuestions(
           currentHash,
@@ -385,16 +516,10 @@ export const InterviewProvider: React.FC<{
           mode,
           jdHash
         );
-
-    /*
-     * If the existing question set was generated for another
-     * resume, DO NOT reuse it.
-     */
     } else if (
       generatedForResumeHash &&
       !questionsBelongToCurrentResume
     ) {
-
       qs =
         await generateQuestions(
           currentHash,
@@ -404,36 +529,20 @@ export const InterviewProvider: React.FC<{
         );
     }
 
-    /*
-     * There is a special case:
-     *
-     * A component may pass a question array directly before
-     * generatedForResumeHash has been established.
-     *
-     * In that case, trust it only if it is accompanied by
-     * the current generation context.
-     *
-     * For normal application flow, generateQuestions() sets
-     * generatedForResumeHash.
-     */
     if (!qs.length) {
-
       throw new Error(
         'No interview questions are available. Generate a question set first.'
       );
     }
 
-    /*
-     * Create the session with the SAME resume hash used
-     * for the current preparation flow.
-     */
     const sessionResponse =
       await sessionApi.createSession({
         resume_hash:
           currentHash,
 
         jd_hash:
-          jdHash || null,
+          jdHash ||
+          null,
 
         mode,
 
@@ -456,55 +565,33 @@ export const InterviewProvider: React.FC<{
       sessionResponse
     );
 
-    setActiveQuestionIndex(
-      0
-    );
-
-    setActiveFeedback(
-      null
-    );
-
-    setActiveFollowUp(
-      null
-    );
-
-    setSessionStats(
-      null
-    );
+    setActiveQuestionIndex(0);
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
+    setSessionStats(null);
 
     return sessionResponse;
   };
-
-  /*
-   * ==========================================================
-   * SUBMIT ANSWER
-   * ==========================================================
-   */
 
   const submitAnswer = async (
     questionId: string,
     answer: string
   ): Promise<SubmitAnswerResponse> => {
-
     if (!currentSession) {
       throw new Error(
         'No active interview session'
       );
     }
 
-    setIsSubmittingAnswer(
-      true
-    );
+    setIsSubmittingAnswer(true);
 
     try {
-
       const response =
         await sessionApi.submitAnswer(
           currentSession.session_id,
           {
             question_id:
               questionId,
-
             user_answer:
               answer,
           }
@@ -526,7 +613,6 @@ export const InterviewProvider: React.FC<{
       if (
         response.is_completed
       ) {
-
         const stats =
           await sessionApi.getSessionStats(
             currentSession.session_id
@@ -538,185 +624,105 @@ export const InterviewProvider: React.FC<{
       }
 
       return response;
-
     } finally {
-
       setIsSubmittingAnswer(
         false
       );
     }
   };
 
-  /*
-   * ==========================================================
-   * NEXT QUESTION
-   * ==========================================================
-   */
-
   const nextQuestion = () => {
-
     if (!currentSession) {
       return;
     }
 
-    setActiveFeedback(
-      null
-    );
-
-    setActiveFollowUp(
-      null
-    );
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
 
     if (
       activeQuestionIndex <
       currentSession.questions.length -
         1
     ) {
-
       setActiveQuestionIndex(
-        (previous) =>
+        previous =>
           previous + 1
       );
-
-    } else {
-
-      sessionApi
-        .getSessionStats(
-          currentSession.session_id
-        )
-        .then(
-          setSessionStats
-        )
-        .catch(
-          () => undefined
-        );
+      return;
     }
-  };
 
-  /*
-   * ==========================================================
-   * PREVIOUS QUESTION
-   * ==========================================================
-   */
+    sessionApi
+      .getSessionStats(
+        currentSession.session_id
+      )
+      .then(setSessionStats)
+      .catch(() => undefined);
+  };
 
   const prevQuestion = () => {
-
     if (
-      activeQuestionIndex >
-      0
+      activeQuestionIndex <= 0
     ) {
-
-      setActiveQuestionIndex(
-        (previous) =>
-          previous - 1
-      );
-
-      setActiveFeedback(
-        null
-      );
-
-      setActiveFollowUp(
-        null
-      );
+      return;
     }
-  };
 
-  /*
-   * ==========================================================
-   * JUMP TO QUESTION
-   * ==========================================================
-   */
+    setActiveQuestionIndex(
+      previous =>
+        previous - 1
+    );
+
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
+  };
 
   const jumpToQuestion = (
     index: number
   ) => {
-
     if (
-      currentSession &&
-      index >= 0 &&
-      index <
-        currentSession.questions
-          .length
+      !currentSession ||
+      index < 0 ||
+      index >=
+        currentSession.questions.length
     ) {
-
-      setActiveQuestionIndex(
-        index
-      );
-
-      setActiveFeedback(
-        null
-      );
-
-      setActiveFollowUp(
-        null
-      );
+      return;
     }
-  };
-
-  /*
-   * ==========================================================
-   * RESET SESSION
-   * ==========================================================
-   */
-
-  const resetSession = () => {
-
-    setCurrentSession(
-      null
-    );
 
     setActiveQuestionIndex(
-      0
+      index
     );
 
-    setActiveFeedback(
-      null
-    );
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
+  };
 
-    setActiveFollowUp(
-      null
-    );
-
-    setSessionStats(
-      null
-    );
-
+  const resetSession = () => {
+    setCurrentSession(null);
+    setActiveQuestionIndex(0);
+    setActiveFeedback(null);
+    setActiveFollowUp(null);
+    setSessionStats(null);
   };
 
   return (
     <InterviewContext.Provider
       value={{
         questions,
-
         generationSummary,
-
         isGenerating,
-
         currentSession,
-
         activeQuestionIndex,
-
         activeFeedback,
-
         activeFollowUp,
-
         isSubmittingAnswer,
-
         sessionStats,
-
         generateQuestions,
-
         startSession,
-
         submitAnswer,
-
         nextQuestion,
-
         prevQuestion,
-
         jumpToQuestion,
-
         resetSession,
+        activateQuestionSet,
       }}
     >
       {children}
@@ -725,7 +731,6 @@ export const InterviewProvider: React.FC<{
 };
 
 export const useInterview = () => {
-
   const context =
     useContext(
       InterviewContext
@@ -738,4 +743,4 @@ export const useInterview = () => {
   }
 
   return context;
-};  
+};
