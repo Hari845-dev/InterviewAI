@@ -1,0 +1,7 @@
+{
+  "name": "InterviewAI",
+  "description": "AI-powered interview preparation platform that analyzes resumes to generate personalized, evidence-grounded interview questions, mock interview sessions, and actionable feedback.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

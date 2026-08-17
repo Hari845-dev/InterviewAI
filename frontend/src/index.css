@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-serif: 'Fraunces', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    --page-bg: #FAF0E6;
+    --surface: #FFF9F3;
+    --surface-strong: #F5DFE8;
+    --text: #232327;
+    --text-secondary: #655D60;
+    --text-muted: #756A6C;
+    --text-subtle: #978A8C;
+    --accent: #B52C6F;
+    --accent-hover: #9F235F;
+    --accent-soft: #E1A5B9;
+    --accent-bg: #F5DFE8;
+    --border: #D9C9C5;
+    --border-soft: #E5D8D4;
+    --border-muted: #EFE4DF;
+    --dark-panel: #232327;
+    --shadow-soft: 0 15px 40px rgba(45, 37, 38, 0.06);
+    --shadow-elevated: 0 20px 55px rgba(45, 37, 38, 0.08);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background-color: var(--page-bg);
+    color: var(--text);
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--page-bg);
+    color: var(--text);
+    margin: 0;
+    line-height: 1.6;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-editorial, .font-serif {
+    font-family: var(--font-serif);
+    color: var(--text);
+  }
+
+  p {
+    color: var(--text-secondary);
+  }
+
+  ::selection {
+    background: rgba(181, 44, 111, 0.18);
+    color: var(--text);
+  }
+
+  button, input, textarea, select {
+    font: inherit;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--text-subtle);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D9C9C5;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #C9B3AF;
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
