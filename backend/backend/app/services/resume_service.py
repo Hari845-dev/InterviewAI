@@ -1,7 +1,9 @@
+import re
+
 from fastapi import HTTPException, UploadFile
 
-from app.ai.gemini_orchestrator import (
-    get_gemini_orchestrator,
+from app.ai.ai_provider import (
+    get_ai_provider,
 )
 from app.database import get_db
 from app.schemas.resume import (
@@ -34,9 +36,7 @@ class ResumeService:
         file: UploadFile,
     ) -> ResumeProfileResponse:
 
-        content = await validate_upload(
-            file
-        )
+        content = await validate_upload(file)
 
         filename = (
             file.filename
@@ -57,40 +57,6 @@ class ResumeService:
                 ),
             )
 
-        # ------------------------------------------------------
-        # DOCUMENT-TYPE VALIDATION
-        # ------------------------------------------------------
-        #
-        # IMPORTANT:
-        # This validation happens AFTER text extraction but
-        # BEFORE hashing, Gemini processing, cache lookup,
-        # or MongoDB insertion.
-        #
-        # This prevents unrelated PDFs/DOCX files such as:
-        # assessments, manuals, invoices, test instructions,
-        # certificates, etc. from being processed as resumes.
-        # ------------------------------------------------------
-
-        validation = validate_resume_document(
-            raw_text,
-            filename,
-        )
-        print(
-        "RESUME VALIDATION DEBUG:",
-        {
-            "valid": validation.is_valid,
-            "score": validation.score,
-            "reasons": validation.reasons,
-            "message": validation.message,
-        },
-)
-
-        if not validation.is_valid:
-            raise HTTPException(
-                status_code=400,
-                detail=validation.message,
-            )
-
         resume_hash = hash_content(
             raw_text
         )
@@ -99,6 +65,15 @@ class ResumeService:
 
         # ------------------------------------------------------
         # EXISTING RESUME
+        # ------------------------------------------------------
+        #
+        # Check the cache before document identity validation.
+        #
+        # This allows an already-processed resume to be reused
+        # without re-running document classification.
+        #
+        # Fresh documents are still validated below before AI
+        # extraction and persistence.
         # ------------------------------------------------------
 
         cached = await db.resume_profiles.find_one(
@@ -110,16 +85,19 @@ class ResumeService:
 
         if cached:
 
-            # Repair old records that may contain
-            # normalized/compressed skill names.
-            repaired_profile = (
-                self._repair_stored_profile(
-                    cached.get(
-                        "structured_profile",
-                        {},
-                    )
+            stored_profile = (
+                cached.get(
+                    "structured_profile",
+                    {},
                 )
+                or {}
             )
+
+            if not isinstance(
+                stored_profile,
+                dict,
+            ):
+                stored_profile = {}
 
             await db.resume_profiles.update_one(
                 {
@@ -127,8 +105,6 @@ class ResumeService:
                 },
                 {
                     "$set": {
-                        "structured_profile":
-                            repaired_profile,
                         "last_used_at":
                             utcnow(),
                     },
@@ -140,7 +116,7 @@ class ResumeService:
 
             profile = (
                 StructuredProfile.model_validate(
-                    repaired_profile
+                    stored_profile
                 )
             )
 
@@ -154,7 +130,45 @@ class ResumeService:
             )
 
         # ------------------------------------------------------
-        # FRESH EXTRACTION
+        # DOCUMENT-TYPE VALIDATION
+        # ------------------------------------------------------
+
+        validation = validate_resume_document(
+            raw_text,
+            filename,
+        )
+
+        print(
+            "RESUME VALIDATION DEBUG:",
+            {
+                "valid":
+                    validation.is_valid,
+                "score":
+                    validation.score,
+                "reasons":
+                    validation.reasons,
+                "message":
+                    validation.message,
+            },
+        )
+
+        if not validation.is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=validation.message,
+            )
+
+        # ------------------------------------------------------
+        # ADDITIONAL IDENTITY VALIDATION
+        # ------------------------------------------------------
+
+        self._validate_resume_identity(
+            raw_text,
+            filename,
+        )
+
+        # ------------------------------------------------------
+        # FRESH AI EXTRACTION
         # ------------------------------------------------------
 
         structured = (
@@ -163,19 +177,17 @@ class ResumeService:
             )
         )
 
-        # IMPORTANT:
+        # ------------------------------------------------------
+        # PRESERVE READABLE DISPLAY VALUES
+        # ------------------------------------------------------
         #
-        # Do NOT normalize skills before storing.
+        # This normalization is applied to newly extracted
+        # profiles before storing them.
         #
-        # We preserve readable resume values such as:
-        #
-        # React.js
-        # PostgreSQL
-        # Object-Oriented Programming (OOP)
-        # Kubernetes
-        #
-        # Matching will normalize these values only
-        # when comparison is required.
+        # Existing cached profiles are intentionally not rewritten
+        # during reads. This prevents historical/raw values such
+        # as "python" from silently changing to "Python".
+        # ------------------------------------------------------
 
         structured.skills = (
             self._clean_display_list(
@@ -195,14 +207,20 @@ class ResumeService:
         now = utcnow()
 
         doc = {
-            "user_id": user_id,
-            "resume_hash": resume_hash,
-            "filename": filename,
+            "user_id":
+                user_id,
+            "resume_hash":
+                resume_hash,
+            "filename":
+                filename,
             "structured_profile":
                 structured.model_dump(),
-            "created_at": now,
-            "last_used_at": now,
-            "hit_count": 0,
+            "created_at":
+                now,
+            "last_used_at":
+                now,
+            "hit_count":
+                0,
         }
 
         await db.resume_profiles.insert_one(
@@ -215,6 +233,157 @@ class ResumeService:
             cached=False,
             created_at=now,
         )
+
+    # ==========================================================
+    # RESUME IDENTITY VALIDATION
+    # ==========================================================
+
+    def _validate_resume_identity(
+        self,
+        text: str,
+        filename: str | None,
+    ) -> None:
+        """
+        Perform a lightweight candidate-identity check.
+
+        A resume should normally contain:
+
+        1. A plausible candidate name.
+        2. Contact information such as an email address
+           or phone number.
+
+        This helper exists independently from the broader
+        document classifier so it can also be tested directly.
+        """
+
+        clean_text = (
+            text or ""
+        ).strip()
+
+        if not clean_text:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Resume identity validation failed: "
+                    "candidate name and email or phone number "
+                    "are required."
+                ),
+            )
+
+        email_pattern = re.compile(
+            r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            re.IGNORECASE,
+        )
+
+        phone_pattern = re.compile(
+            r"(?<!\d)"
+            r"(?:\+?\d{1,3}[\s.-]?)?"
+            r"(?:\(?\d{2,5}\)?[\s.-]?)?"
+            r"\d{3,4}[\s.-]?\d{3,4}"
+            r"(?!\d)"
+        )
+
+        has_email = bool(
+            email_pattern.search(
+                clean_text
+            )
+        )
+
+        has_phone = bool(
+            phone_pattern.search(
+                clean_text
+            )
+        )
+
+        # Look for a plausible name in the first several lines.
+        lines = [
+            line.strip()
+            for line in clean_text.splitlines()
+            if line.strip()
+        ]
+
+        name_candidate = None
+
+        for line in lines[:8]:
+
+            if len(line) > 80:
+                continue
+
+            if email_pattern.search(
+                line
+            ):
+                continue
+
+            if phone_pattern.search(
+                line
+            ):
+                continue
+
+            lowered = line.lower()
+
+            blocked_tokens = (
+                "resume",
+                "curriculum vitae",
+                "cv",
+                "profile",
+                "summary",
+                "objective",
+                "skills",
+                "experience",
+                "education",
+                "projects",
+                "certification",
+                "developer",
+                "engineer",
+                "application",
+                "software",
+                "dashboard",
+                "startup",
+                "company",
+            )
+
+            if any(
+                token in lowered
+                for token in blocked_tokens
+            ):
+                continue
+
+            words = re.findall(
+                r"[A-Za-z][A-Za-z.'-]*",
+                line,
+            )
+
+            if (
+                2 <= len(words) <= 5
+            ):
+                alpha_words = [
+                    word
+                    for word in words
+                    if len(word) >= 2
+                ]
+
+                if (
+                    len(alpha_words)
+                    >= 2
+                ):
+                    name_candidate = line
+                    break
+
+        has_name = bool(
+            name_candidate
+        )
+
+        if not has_name or not (
+            has_email or has_phone
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Resume identity validation failed: "
+                    "candidate name and email or phone number "
+                    "are required."
+                ),
+            )
 
     # ==========================================================
     # GET ANALYSIS
@@ -230,8 +399,10 @@ class ResumeService:
 
         doc = await db.resume_profiles.find_one(
             {
-                "user_id": user_id,
-                "resume_hash": resume_hash,
+                "user_id":
+                    user_id,
+                "resume_hash":
+                    resume_hash,
             }
         )
 
@@ -241,46 +412,37 @@ class ResumeService:
                 detail="Resume not found",
             )
 
-        repaired_profile = (
-            self._repair_stored_profile(
-                doc.get(
-                    "structured_profile",
-                    {},
-                )
+        stored_profile = (
+            doc.get(
+                "structured_profile",
+                {},
             )
+            or {}
         )
 
-        # Persist the repaired readable values.
-        await db.resume_profiles.update_one(
-            {
-                "_id": doc["_id"],
-            },
-            {
-                "$set": {
-                    "structured_profile":
-                        repaired_profile
-                }
-            },
-        )
+        if not isinstance(
+            stored_profile,
+            dict,
+        ):
+            stored_profile = {}
 
         profile = (
             StructuredProfile.model_validate(
-                repaired_profile
+                stored_profile
             )
         )
 
         return ResumeAnalysisResponse(
-            resume_hash=resume_hash,
-            structured_profile=profile,
-            skills_count=len(
-                profile.skills
-            ),
-            projects_count=len(
-                profile.projects
-            ),
-            experience_count=len(
-                profile.experience
-            ),
+            resume_hash=
+                resume_hash,
+            structured_profile=
+                profile,
+            skills_count=
+                len(profile.skills),
+            projects_count=
+                len(profile.projects),
+            experience_count=
+                len(profile.experience),
         )
 
     # ==========================================================
@@ -297,8 +459,10 @@ class ResumeService:
 
         doc = await db.resume_profiles.find_one(
             {
-                "user_id": user_id,
-                "resume_hash": resume_hash,
+                "user_id":
+                    user_id,
+                "resume_hash":
+                    resume_hash,
             }
         )
 
@@ -308,35 +472,28 @@ class ResumeService:
                 detail="Resume not found",
             )
 
-        repaired_profile = (
-            self._repair_stored_profile(
-                doc.get(
-                    "structured_profile",
-                    {},
-                )
+        stored_profile = (
+            doc.get(
+                "structured_profile",
+                {},
             )
+            or {}
         )
 
-        # Save repaired profile so future requests
-        # receive readable values immediately.
-        await db.resume_profiles.update_one(
-            {
-                "_id": doc["_id"],
-            },
-            {
-                "$set": {
-                    "structured_profile":
-                        repaired_profile
-                }
-            },
-        )
+        if not isinstance(
+            stored_profile,
+            dict,
+        ):
+            stored_profile = {}
 
+        # Do not rewrite stored display values when simply
+        # reading a profile.
         return StructuredProfile.model_validate(
-            repaired_profile
+            stored_profile
         )
 
     # ==========================================================
-    # GEMINI EXTRACTION
+    # AI PROFILE EXTRACTION
     # ==========================================================
 
     async def _extract_profile(
@@ -344,11 +501,9 @@ class ResumeService:
         text: str,
     ) -> StructuredProfile:
 
-        gemini = (
-            get_gemini_orchestrator()
-        )
+        ai = get_ai_provider()
 
-        if not gemini.is_available:
+        if not ai.is_available:
             return self._fallback_profile(
                 text
             )
@@ -408,7 +563,7 @@ Rules:
         try:
 
             parsed, _ = (
-                await gemini.generate_json(
+                await ai.generate_json(
                     prompt,
                     {
                         "resume_text":
@@ -448,7 +603,7 @@ Rules:
             )
 
     # ==========================================================
-    # CLEAN GEMINI OUTPUT
+    # NORMALIZE AI OUTPUT
     # ==========================================================
 
     def _normalize_extracted_profile(
@@ -478,6 +633,7 @@ Rules:
                 values,
                 list,
             ):
+
                 text = clean_text(
                     values
                 )
@@ -502,10 +658,6 @@ Rules:
                     )
 
             return cleaned
-
-        # ------------------------------------------------------
-        # PROJECTS
-        # ------------------------------------------------------
 
         projects: list[dict] = []
 
@@ -544,10 +696,6 @@ Rules:
                         ),
                 }
             )
-
-        # ------------------------------------------------------
-        # EXPERIENCE
-        # ------------------------------------------------------
 
         experience: list[dict] = []
 
@@ -601,10 +749,6 @@ Rules:
                         ),
                 }
             )
-
-        # ------------------------------------------------------
-        # EDUCATION
-        # ------------------------------------------------------
 
         education: list[dict] = []
 
@@ -699,28 +843,11 @@ Rules:
             stored,
             dict,
         ):
-            return stored
+            return {}
 
         repaired = dict(
             stored
         )
-
-        # ------------------------------------------------------
-        # REPAIR SKILLS
-        # ------------------------------------------------------
-
-        repaired["skills"] = (
-            self._clean_display_list(
-                repaired.get(
-                    "skills",
-                    [],
-                )
-            )
-        )
-
-        # ------------------------------------------------------
-        # REPAIR PROJECT TECH STACK
-        # ------------------------------------------------------
 
         repaired_projects = []
 
@@ -740,17 +867,6 @@ Rules:
 
             project_copy = dict(
                 project
-            )
-
-            project_copy[
-                "tech_stack"
-            ] = (
-                self._clean_display_list(
-                    project_copy.get(
-                        "tech_stack",
-                        [],
-                    )
-                )
             )
 
             repaired_projects.append(
@@ -834,198 +950,125 @@ Rules:
         )
 
         known = {
-            # Python
             "py": "Python",
             "python3": "Python",
             "python": "Python",
 
-            # JavaScript
             "js": "JavaScript",
             "javascript": "JavaScript",
             "javascriptes6":
                 "JavaScript",
 
-            # TypeScript
             "ts": "TypeScript",
-            "typescript":
-                "TypeScript",
+            "typescript": "TypeScript",
 
-            # React
             "reactjs": "React",
             "react.js": "React",
             "react": "React",
 
-            # Node
             "nodejs": "Node.js",
             "node.js": "Node.js",
             "node": "Node.js",
 
-            # Databases
-            "postgres":
-                "PostgreSQL",
-            "postgresql":
-                "PostgreSQL",
-            "psql":
-                "PostgreSQL",
+            "postgres": "PostgreSQL",
+            "postgresql": "PostgreSQL",
+            "psql": "PostgreSQL",
 
-            "mongo":
-                "MongoDB",
-            "mongodb":
-                "MongoDB",
+            "mongo": "MongoDB",
+            "mongodb": "MongoDB",
 
-            "mysql":
-                "MySQL",
+            "mysql": "MySQL",
+            "sqlserver": "SQL Server",
+            "sqlite3": "SQLite",
 
-            "sqlserver":
-                "SQL Server",
+            "k8s": "Kubernetes",
+            "kubernetes": "Kubernetes",
 
-            "sqlite3":
-                "SQLite",
+            "aws": "AWS",
+            "amazonwebservices": "AWS",
 
-            # Kubernetes
-            "k8s":
-                "Kubernetes",
-            "kubernetes":
-                "Kubernetes",
+            "azure": "Azure",
+            "microsoftazure": "Azure",
 
-            # Cloud
-            "aws":
-                "AWS",
-            "amazonwebservices":
-                "AWS",
-
-            "azure":
-                "Azure",
-            "microsoftazure":
-                "Azure",
-
-            "gcp":
-                "Google Cloud",
-            "googlecloud":
-                "Google Cloud",
+            "gcp": "Google Cloud",
+            "googlecloud": "Google Cloud",
             "googlecloudplatform":
                 "Google Cloud",
 
-            # Backend
-            "fastapi":
-                "FastAPI",
-            "django":
-                "Django",
-            "flask":
-                "Flask",
+            "fastapi": "FastAPI",
+            "django": "Django",
+            "flask": "Flask",
 
-            # Containers
-            "docker":
-                "Docker",
+            "docker": "Docker",
             "dockercompose":
                 "Docker Compose",
 
-            # Languages
-            "java":
-                "Java",
-            "csharp":
-                "C#",
-            "c#":
-                "C#",
-            "cpp":
-                "C++",
-            "cplusplus":
-                "C++",
-            "c++":
-                "C++",
-            "kotlin":
-                "Kotlin",
-            "golang":
-                "Go",
+            "java": "Java",
+            "csharp": "C#",
+            "c#": "C#",
 
-            # Frontend
-            "nextjs":
-                "Next.js",
-            "next.js":
-                "Next.js",
-            "vuejs":
-                "Vue",
-            "vue.js":
-                "Vue",
-            "vue":
-                "Vue",
-            "angularjs":
-                "Angular",
-            "angular":
-                "Angular",
+            "cpp": "C++",
+            "cplusplus": "C++",
+            "c++": "C++",
 
-            # Testing
-            "pytest":
-                "PyTest",
-            "jest":
-                "Jest",
-            "junit":
-                "JUnit",
-            "selenium":
-                "Selenium",
+            "kotlin": "Kotlin",
+            "golang": "Go",
 
-            # Data
-            "pandas":
-                "Pandas",
-            "numpy":
-                "NumPy",
-            "sklearn":
-                "scikit-learn",
-            "scikitlearn":
-                "scikit-learn",
-            "scikit-learn":
-                "scikit-learn",
+            "nextjs": "Next.js",
+            "next.js": "Next.js",
 
-            # AI / ML
-            "ml":
-                "Machine Learning",
+            "vuejs": "Vue",
+            "vue.js": "Vue",
+            "vue": "Vue",
+
+            "angularjs": "Angular",
+            "angular": "Angular",
+
+            "pytest": "PyTest",
+            "jest": "Jest",
+            "junit": "JUnit",
+            "selenium": "Selenium",
+
+            "pandas": "Pandas",
+            "numpy": "NumPy",
+
+            "sklearn": "scikit-learn",
+            "scikitlearn": "scikit-learn",
+            "scikit-learn": "scikit-learn",
+
+            "ml": "Machine Learning",
             "machinelearning":
                 "Machine Learning",
-            "ai":
-                "Artificial Intelligence",
+
+            "ai": "Artificial Intelligence",
             "artificialintelligence":
                 "Artificial Intelligence",
+
             "nlp":
                 "Natural Language Processing",
             "naturallanguageprocessing":
                 "Natural Language Processing",
 
-            "tensorflow":
-                "TensorFlow",
-            "tf":
-                "TensorFlow",
+            "tensorflow": "TensorFlow",
+            "tf": "TensorFlow",
 
-            "pytorch":
-                "PyTorch",
-            "torch":
-                "PyTorch",
+            "pytorch": "PyTorch",
+            "torch": "PyTorch",
 
-            # Messaging
-            "kafka":
-                "Apache Kafka",
-            "apachekafka":
-                "Apache Kafka",
-            "rabbitmq":
-                "RabbitMQ",
+            "kafka": "Apache Kafka",
+            "apachekafka": "Apache Kafka",
 
-            # APIs
-            "restapi":
-                "REST APIs",
-            "restapis":
-                "REST APIs",
-            "restfulapi":
-                "REST APIs",
-            "rest":
-                "REST APIs",
+            "rabbitmq": "RabbitMQ",
 
-            "graphql":
-                "GraphQL",
+            "restapi": "REST APIs",
+            "restapis": "REST APIs",
+            "restfulapi": "REST APIs",
+            "rest": "REST APIs",
 
-            # General technical
-            "sql":
-                "SQL",
+            "graphql": "GraphQL",
 
-            # Common phrases
+            "sql": "SQL",
+
             "objectorientedprogramming":
                 "Object-Oriented Programming",
 
@@ -1070,7 +1113,6 @@ Rules:
 
             "teamwork":
                 "Teamwork",
-
         }
 
         if lowered in known:
@@ -1078,18 +1120,10 @@ Rules:
                 lowered
             ]
 
-        # ------------------------------------------------------
-        # Preserve readable multi-word values.
-        # ------------------------------------------------------
-
         if " " in value:
             return value.strip()
 
-        # ------------------------------------------------------
-        # Basic separator cleanup.
-        # ------------------------------------------------------
-
-        readable = (
+        return (
             value
             .replace(
                 "_",
@@ -1101,8 +1135,6 @@ Rules:
             )
             .strip()
         )
-
-        return readable
 
     # ==========================================================
     # FALLBACK PROFILE
@@ -1140,4 +1172,4 @@ Rules:
 
         return StructuredProfile(
             skills=skills
-        )   
+        )

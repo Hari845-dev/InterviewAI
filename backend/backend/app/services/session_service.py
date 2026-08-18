@@ -1,8 +1,9 @@
 from datetime import datetime
+import re
 
 from fastapi import HTTPException
 
-from app.ai.gemini_orchestrator import get_gemini_orchestrator
+from app.ai.ai_provider import get_ai_provider
 from app.database import get_db
 from app.schemas.common import GenerationSummary
 from app.schemas.questions import InterviewQuestion
@@ -328,7 +329,7 @@ class SessionService:
             )
 
         else:
-            feedback, gemini_count = (
+            feedback, ai_count = (
                 await self._evaluate_answer(
                     question,
                     req.user_answer
@@ -346,7 +347,7 @@ class SessionService:
                 {
                     "$inc": {
                         "metrics.gemini_requests":
-                            gemini_count
+                            ai_count
                     }
                 },
             )
@@ -530,7 +531,6 @@ class SessionService:
             "user_id": user_id
         }
 
-        # Resume-specific dashboard
         if resume_hash:
             query["resume_hash"] = resume_hash
 
@@ -544,10 +544,6 @@ class SessionService:
             session
             async for session in cursor
         ]
-
-        # ======================================================
-        # NO SESSIONS
-        # ======================================================
 
         if not sessions:
             return DashboardMetrics(
@@ -568,10 +564,6 @@ class SessionService:
                 gemini_requests=0,
                 session_history=[],
             )
-
-        # ======================================================
-        # ACCUMULATORS
-        # ======================================================
 
         total_attempted = 0
         total_completed = 0
@@ -595,10 +587,6 @@ class SessionService:
         history: list[
             SessionHistoryItem
         ] = []
-
-        # ======================================================
-        # PROCESS SESSIONS
-        # ======================================================
 
         for session in sessions:
 
@@ -630,10 +618,6 @@ class SessionService:
             gemini_total += (
                 stats.gemini_requests
             )
-
-            # ==================================================
-            # CATEGORY SCORES
-            # ==================================================
 
             if session["mode"] == "aptitude":
 
@@ -704,10 +688,6 @@ class SessionService:
                     ):
                         continue
 
-                    # Technical includes:
-                    # technical
-                    # problem_solving
-                    # jd_matched
                     if category in (
                         "technical",
                         "problem_solving",
@@ -737,10 +717,6 @@ class SessionService:
                             float(score)
                         )
 
-        # ======================================================
-        # HELPERS
-        # ======================================================
-
         def avg(
             values: list[float]
         ) -> float:
@@ -754,10 +730,6 @@ class SessionService:
                 if values
                 else 0.0
             )
-
-        # ======================================================
-        # STRONG / WEAK SKILLS
-        # ======================================================
 
         strong = sorted(
             skill_scores,
@@ -780,10 +752,6 @@ class SessionService:
                 ),
         )[:5]
 
-        # ======================================================
-        # CACHE METRICS
-        # ======================================================
-
         total_questions_generated = (
             cached_total
             + fresh_total
@@ -796,10 +764,6 @@ class SessionService:
             if total_questions_generated
             else 0
         )
-
-        # ======================================================
-        # HISTORY
-        # ======================================================
 
         for session in sessions:
 
@@ -921,10 +885,6 @@ class SessionService:
                 )
             )
 
-        # ======================================================
-        # FINAL RESPONSE
-        # ======================================================
-
         return DashboardMetrics(
             total_sessions=len(
                 sessions
@@ -1029,7 +989,115 @@ class SessionService:
         return None
 
     # ==========================================================
-    # GEMINI ANSWER EVALUATION
+    # ANSWER QUALITY CHECK
+    # ==========================================================
+
+    def _is_obviously_invalid_answer(
+        self,
+        user_answer: str,
+    ) -> bool:
+        """
+        Detect obvious accidental or meaningless input.
+
+        This check does not attempt to determine whether an answer
+        is technically correct. It only catches clear gibberish.
+        """
+
+        text = " ".join(
+            (user_answer or "").split()
+        ).strip()
+
+        if not text:
+            return True
+
+        alphanumeric = re.sub(
+            r"[^A-Za-z0-9]+",
+            "",
+            text,
+        )
+
+        if not alphanumeric:
+            return True
+
+        normalized = re.sub(
+            r"[^a-z0-9]+",
+            "",
+            text.lower(),
+        )
+
+        obvious_sequences = {
+            "asdf",
+            "asdfg",
+            "asdfgh",
+            "asdfghj",
+            "asdfghjk",
+            "asdfghjkl",
+            "qwerty",
+            "qwertyui",
+            "qwertyuiop",
+            "zxcv",
+            "zxcvb",
+            "zxcvbn",
+            "zxcvbnm",
+            "sdfgh",
+            "sdfghj",
+            "sdfghjk",
+            "sdfghjkl",
+        }
+
+        if normalized in obvious_sequences:
+            return True
+
+        letters_only = bool(
+            re.fullmatch(
+                r"[A-Za-z]+",
+                normalized,
+            )
+        )
+
+        if (
+            letters_only
+            and len(normalized) >= 5
+            and not re.search(
+                r"[aeiou]",
+                normalized,
+            )
+        ):
+            return True
+
+        if len(set(normalized)) == 1:
+            return True
+
+        return False
+
+    def _build_invalid_answer_feedback(
+        self,
+        question: dict,
+    ) -> AnswerFeedback:
+        return AnswerFeedback(
+            score=0.0,
+            strengths=[],
+            weaknesses=[
+                "The submitted response does not provide "
+                "a meaningful answer to the question."
+            ],
+            missing_points=[
+                "A substantive explanation addressing "
+                "the question was not provided."
+            ],
+            improvement_suggestions=[
+                "Provide a direct answer that explains "
+                "your approach, reasoning, or relevant "
+                "technical concepts."
+            ],
+            ideal_answer=question.get(
+                "suggested_answer",
+                ""
+            ),
+        )
+
+    # ==========================================================
+    # AI ANSWER EVALUATION
     # ==========================================================
 
     async def _evaluate_answer(
@@ -1041,11 +1109,19 @@ class SessionService:
         int
     ]:
 
-        gemini = (
-            get_gemini_orchestrator()
-        )
+        if self._is_obviously_invalid_answer(
+            user_answer
+        ):
+            return (
+                self._build_invalid_answer_feedback(
+                    question
+                ),
+                0,
+            )
 
-        if not gemini.is_available:
+        ai = get_ai_provider()
+
+        if not ai.is_available:
 
             return (
                 AnswerFeedback(
@@ -1054,11 +1130,12 @@ class SessionService:
                         "Answer submitted"
                     ],
                     weaknesses=[
-                        "AI evaluation unavailable without Gemini keys"
+                        "AI evaluation unavailable"
                     ],
                     missing_points=[],
                     improvement_suggestions=[
-                        "Configure Gemini API keys for detailed feedback"
+                        "Configure at least one AI provider "
+                        "for detailed answer feedback"
                     ],
                     ideal_answer=
                         question.get(
@@ -1083,8 +1160,23 @@ Return JSON:
   "ideal_answer": "..."
 }
 
-Do not invent candidate facts.
-Base evaluation on the question and answer only.
+Rules:
+
+1. Evaluate ONLY the candidate's actual answer.
+2. Resume evidence is context only. It is not part of the candidate's answer.
+3. The suggested answer is a reference for expected concepts only.
+4. Never award credit for information found only in the resume,
+   evidence, suggested answer, or question.
+5. Give credit only for concepts actually expressed in the candidate answer.
+6. Different wording is acceptable when the underlying concept is correct.
+7. Do not infer missing content from the candidate's resume.
+8. Do not assume knowledge merely because a skill appears in the resume.
+9. Keep strengths specific to what the candidate actually stated.
+10. If the answer is partially correct, give partial credit and identify
+    what is missing.
+11. If the answer is irrelevant but meaningful, score it low and explain why.
+12. The score must be between 0 and 100.
+13. Return ONLY valid JSON.
 """
 
         context = {
@@ -1107,17 +1199,36 @@ Base evaluation on the question and answer only.
                 ),
         }
 
-        parsed, count = (
-            await gemini.generate_json(
-                prompt,
-                context
+        parsed, count = await ai.generate_json(
+            prompt,
+            context,
+            task_type="answer_evaluation",
+        )
+
+        try:
+            feedback = (
+                AnswerFeedback.model_validate(
+                    parsed
+                )
             )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Invalid AI answer evaluation response."
+                ),
+            ) from exc
+
+        feedback.score = max(
+            0.0,
+            min(
+                100.0,
+                float(feedback.score),
+            ),
         )
 
         return (
-            AnswerFeedback.model_validate(
-                parsed
-            ),
+            feedback,
             count,
         )
 

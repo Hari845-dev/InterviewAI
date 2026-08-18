@@ -13,9 +13,9 @@ import {
   PlayCircle,
   Filter,
   ShieldCheck,
-  Cpu,
   Sliders,
   Target,
+  CheckCircle2,
 } from 'lucide-react';
 
 import {
@@ -53,11 +53,10 @@ function getStoredQuestionSets(
   userId: string | null | undefined
 ): QuestionSetRecord[] {
   try {
-    const key =
-      getUserScopedKey(
-        RECENT_SETS_KEY_PREFIX,
-        userId
-      );
+    const key = getUserScopedKey(
+      RECENT_SETS_KEY_PREFIX,
+      userId
+    );
 
     if (!key) {
       return [];
@@ -70,11 +69,10 @@ function getStoredQuestionSets(
       return [];
     }
 
-    const parsed =
-      JSON.parse(raw);
+    const parsed = JSON.parse(raw);
 
     return Array.isArray(parsed)
-      ? parsed as QuestionSetRecord[]
+      ? (parsed as QuestionSetRecord[])
       : [];
   } catch {
     return [];
@@ -85,11 +83,10 @@ function getStoredActiveQuestionSet(
   userId: string | null | undefined
 ): QuestionSetRecord | null {
   try {
-    const key =
-      getUserScopedKey(
-        ACTIVE_QUESTION_SET_PREFIX,
-        userId
-      );
+    const key = getUserScopedKey(
+      ACTIVE_QUESTION_SET_PREFIX,
+      userId
+    );
 
     if (!key) {
       return null;
@@ -102,14 +99,11 @@ function getStoredActiveQuestionSet(
       return null;
     }
 
-    const parsed =
-      JSON.parse(raw);
+    const parsed = JSON.parse(raw);
 
     if (
       parsed &&
-      Array.isArray(
-        parsed.questions
-      ) &&
+      Array.isArray(parsed.questions) &&
       parsed.questions.length > 0
     ) {
       return parsed as QuestionSetRecord;
@@ -126,11 +120,10 @@ function saveStoredActiveQuestionSet(
   set: QuestionSetRecord
 ) {
   try {
-    const key =
-      getUserScopedKey(
-        ACTIVE_QUESTION_SET_PREFIX,
-        userId
-      );
+    const key = getUserScopedKey(
+      ACTIVE_QUESTION_SET_PREFIX,
+      userId
+    );
 
     if (!key) {
       return;
@@ -146,8 +139,7 @@ function saveStoredActiveQuestionSet(
 }
 
 export const QuestionsView: React.FC = () => {
-  const navigate =
-    useNavigate();
+  const navigate = useNavigate();
 
   const {
     questions,
@@ -157,9 +149,7 @@ export const QuestionsView: React.FC = () => {
     activateQuestionSet,
   } = useInterview();
 
-  const {
-    user,
-  } = useAuth();
+  const { user } = useAuth();
 
   const userId =
     user?.id || null;
@@ -174,24 +164,19 @@ export const QuestionsView: React.FC = () => {
   const [
     selectedTypeFilter,
     setSelectedTypeFilter,
-  ] = useState<string>(
-    'All'
-  );
+  ] = useState<string>('All');
 
   const [
     selectedDifficultyFilter,
     setSelectedDifficultyFilter,
-  ] = useState<string>(
-    'All'
-  );
+  ] = useState<string>('All');
 
   const [
     restoredSet,
     setRestoredSet,
-  ] =
-    useState<QuestionSetRecord | null>(
-      null
-    );
+  ] = useState<QuestionSetRecord | null>(
+    null
+  );
 
   useEffect(() => {
     if (!userId) {
@@ -199,39 +184,28 @@ export const QuestionsView: React.FC = () => {
       return;
     }
 
-    if (
-      questions.length > 0
-    ) {
+    if (questions.length > 0) {
       return;
     }
 
     const stored =
-      getStoredActiveQuestionSet(
-        userId
-      );
+      getStoredActiveQuestionSet(userId);
 
     if (
       stored &&
       stored.questions.length > 0
     ) {
-      setRestoredSet(
-        stored
-      );
+      setRestoredSet(stored);
 
-      activateQuestionSet(
-        stored
-      );
+      activateQuestionSet(stored);
 
       return;
     }
 
     const savedSets =
-      getStoredQuestionSets(
-        userId
-      );
+      getStoredQuestionSets(userId);
 
-    const latest =
-      savedSets[0];
+    const latest = savedSets[0];
 
     if (
       latest &&
@@ -242,13 +216,9 @@ export const QuestionsView: React.FC = () => {
         latest
       );
 
-      setRestoredSet(
-        latest
-      );
+      setRestoredSet(latest);
 
-      activateQuestionSet(
-        latest
-      );
+      activateQuestionSet(latest);
     }
   }, [
     userId,
@@ -259,54 +229,45 @@ export const QuestionsView: React.FC = () => {
   const activeQuestions =
     questions.length > 0
       ? questions
-      : restoredSet?.questions ||
-        [];
+      : restoredSet?.questions || [];
 
   const activeSummary =
     generationSummary ||
-    restoredSet
-      ?.generation_summary ||
+    restoredSet?.generation_summary ||
     null;
 
   const toggleWhy = (
     id: string
   ) => {
-    setExpandedWhy(
-      prev => ({
-        ...prev,
-        [id]:
-          !prev[id],
-      })
-    );
+    setExpandedWhy(prev => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
   };
 
   const filteredQuestions =
     useMemo(() => {
-      return activeQuestions.filter(
-        q => {
-          const matchesType =
-            selectedTypeFilter ===
-              'All' ||
-            String(
-              q.category ||
-                q.type ||
-                ''
-            ).toLowerCase() ===
-              selectedTypeFilter.toLowerCase();
+      return activeQuestions.filter(q => {
+        const matchesType =
+          selectedTypeFilter === 'All' ||
+          String(
+            q.category ||
+              q.type ||
+              ''
+          ).toLowerCase() ===
+            selectedTypeFilter.toLowerCase();
 
-          const matchesDiff =
-            selectedDifficultyFilter ===
-              'All' ||
-            q.difficulty
-              .toLowerCase() ===
-              selectedDifficultyFilter.toLowerCase();
+        const matchesDiff =
+          selectedDifficultyFilter ===
+            'All' ||
+          q.difficulty.toLowerCase() ===
+            selectedDifficultyFilter.toLowerCase();
 
-          return (
-            matchesType &&
-            matchesDiff
-          );
-        }
-      );
+        return (
+          matchesType &&
+          matchesDiff
+        );
+      });
     }, [
       activeQuestions,
       selectedTypeFilter,
@@ -315,10 +276,7 @@ export const QuestionsView: React.FC = () => {
 
   const handleLaunchFullInterview =
     async () => {
-      if (
-        activeQuestions.length ===
-        0
-      ) {
+      if (activeQuestions.length === 0) {
         return;
       }
 
@@ -347,21 +305,15 @@ export const QuestionsView: React.FC = () => {
     };
 
   const getDifficultyBadgeColor =
-    (
-      diff: string
-    ) => {
+    (diff: string) => {
       const value =
         diff.toLowerCase();
 
-      if (
-        value === 'easy'
-      ) {
+      if (value === 'easy') {
         return 'bg-green-50 text-green-700 border-green-200';
       }
 
-      if (
-        value === 'hard'
-      ) {
+      if (value === 'hard') {
         return 'bg-red-50 text-red-700 border-red-200';
       }
 
@@ -369,9 +321,7 @@ export const QuestionsView: React.FC = () => {
     };
 
   const getTypeBadgeColor =
-    (
-      type: QuestionType
-    ) => {
+    (type: QuestionType) => {
       switch (type) {
         case 'project':
           return 'bg-indigo-50 text-indigo-700 border-indigo-200';
@@ -397,26 +347,24 @@ export const QuestionsView: React.FC = () => {
     (
       question: InterviewQuestion
     ): QuestionType => {
-      const value =
-        String(
-          question.category ||
-            question.type ||
-            'technical'
-        ).toLowerCase();
+      const value = String(
+        question.category ||
+          question.type ||
+          'technical'
+      ).toLowerCase();
 
-      const allowedTypes: QuestionType[] =
-        [
-          'project',
-          'technical',
-          'experience',
-          'problem_solving',
-          'hr',
-        ];
+      const allowedTypes: QuestionType[] = [
+        'project',
+        'technical',
+        'experience',
+        'problem_solving',
+        'hr',
+      ];
 
       return allowedTypes.includes(
         value as QuestionType
       )
-        ? value as QuestionType
+        ? (value as QuestionType)
         : 'technical';
     };
 
@@ -426,7 +374,6 @@ export const QuestionsView: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
 
         <div>
-
           <div className="flex items-center gap-2">
 
             <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">
@@ -434,8 +381,7 @@ export const QuestionsView: React.FC = () => {
             </span>
 
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-indigo-50 text-indigo-700 border border-indigo-100">
-              Bank: {activeQuestions.length}{' '}
-              Questions
+              Bank: {activeQuestions.length} Questions
             </span>
 
           </div>
@@ -447,7 +393,6 @@ export const QuestionsView: React.FC = () => {
           <p className="text-gray-500 text-sm mt-1">
             Grounded directly in your projects, work experience, and detected skill claims.
           </p>
-
         </div>
 
         <div className="flex items-center gap-3">
@@ -455,23 +400,18 @@ export const QuestionsView: React.FC = () => {
           <button
             type="button"
             onClick={() =>
-              navigate(
-                '/app/prepare'
-              )
+              navigate('/app/prepare')
             }
             className="px-4 py-2.5 rounded-full bg-white border border-gray-200 text-gray-700 text-xs font-semibold hover:bg-gray-50 transition-all flex items-center gap-1.5 shadow-sm"
           >
-
             <Sliders className="w-3.5 h-3.5" />
 
             <span>
               Calibrate Setup
             </span>
-
           </button>
 
-          {activeQuestions.length >
-            0 && (
+          {activeQuestions.length > 0 && (
             <button
               type="button"
               onClick={
@@ -479,66 +419,50 @@ export const QuestionsView: React.FC = () => {
               }
               className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-full text-sm font-medium shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all"
             >
-
               <PlayCircle className="w-4 h-4" />
 
               <span>
                 Start Full Mock
               </span>
-
             </button>
           )}
 
         </div>
-
       </div>
 
       {activeSummary && (
-        <div className="p-6 rounded-[24px] bg-[#121212] text-white shadow-lg flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="p-5 sm:p-6 rounded-[24px] bg-white border border-gray-100 shadow-sm">
 
-          <div className="flex items-center gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
 
-            <div className="w-10 h-10 rounded-xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center shrink-0">
+            <div className="flex items-center gap-4">
 
-              <Cpu className="w-5 h-5" />
+              <div className="w-11 h-11 rounded-2xl bg-green-50 border border-green-100 text-green-600 flex items-center justify-center shrink-0">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
 
-            </div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900">
+                  Interview Question Set Ready
+                </h3>
 
-            <div>
-
-              <h3 className="text-sm font-bold text-white">
-
-                Interview Question Set Ready (
-                {activeSummary.questions_requested}{' '}
-                Questions)
-
-              </h3>
-
-              <p className="text-xs text-white/60 font-mono mt-0.5">
-
-                {activeSummary.cached_questions}{' '}
-                cached •{' '}
-                {activeSummary.fresh_questions}{' '}
-                newly generated •{' '}
-                {activeSummary.cache_hit_rate}% cache hit rate •{' '}
-                {activeSummary.gemini_requests}{' '}
-                Gemini request
-
-              </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  {activeQuestions.length || activeSummary.questions_requested} personalized questions prepared from your selected setup.
+                </p>
+              </div>
 
             </div>
+
+            <span className="text-xs font-medium text-gray-400">
+              Ready to practice
+            </span>
 
           </div>
-
-          <span className="px-3 py-1 rounded-full bg-white/10 border border-white/10 text-white/80 text-xs font-mono">
-            FastAPI Grounded
-          </span>
 
         </div>
       )}
 
-      {activeQuestions.length >
-        0 && (
+      {activeQuestions.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-[24px] bg-white border border-gray-100 shadow-sm">
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -558,35 +482,29 @@ export const QuestionsView: React.FC = () => {
               'experience',
               'problem_solving',
               'hr',
-            ].map(
-              type => (
-                <button
-                  key={type}
-                  type="button"
-                  onClick={() =>
-                    setSelectedTypeFilter(
-                      type
-                    )
-                  }
-                  className={`px-3.5 py-1.5 rounded-full font-medium transition-all text-xs ${
-                    selectedTypeFilter ===
+            ].map(type => (
+              <button
+                key={type}
+                type="button"
+                onClick={() =>
+                  setSelectedTypeFilter(
                     type
-                      ? 'bg-gray-900 text-white shadow-sm'
-                      : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100'
-                  }`}
-                >
-
-                  {type ===
-                  'All'
-                    ? 'All Types'
-                    : type.replace(
-                        '_',
-                        ' '
-                      )}
-
-                </button>
-              )
-            )}
+                  )
+                }
+                className={`px-3.5 py-1.5 rounded-full font-medium transition-all text-xs ${
+                  selectedTypeFilter === type
+                    ? 'bg-gray-900 text-white shadow-sm'
+                    : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100'
+                }`}
+              >
+                {type === 'All'
+                  ? 'All Types'
+                  : type.replace(
+                      '_',
+                      ' '
+                    )}
+              </button>
+            ))}
 
           </div>
 
@@ -601,29 +519,25 @@ export const QuestionsView: React.FC = () => {
               'Easy',
               'Medium',
               'Hard',
-            ].map(
-              difficulty => (
-                <button
-                  key={
+            ].map(difficulty => (
+              <button
+                key={difficulty}
+                type="button"
+                onClick={() =>
+                  setSelectedDifficultyFilter(
                     difficulty
-                  }
-                  type="button"
-                  onClick={() =>
-                    setSelectedDifficultyFilter(
-                      difficulty
-                    )
-                  }
-                  className={`px-3 py-1 rounded-full font-medium transition-all text-xs ${
-                    selectedDifficultyFilter ===
-                    difficulty
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100'
-                  }`}
-                >
-                  {difficulty}
-                </button>
-              )
-            )}
+                  )
+                }
+                className={`px-3 py-1 rounded-full font-medium transition-all text-xs ${
+                  selectedDifficultyFilter ===
+                  difficulty
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-100'
+                }`}
+              >
+                {difficulty}
+              </button>
+            ))}
 
           </div>
 
@@ -640,7 +554,7 @@ export const QuestionsView: React.FC = () => {
           </h3>
 
           <p className="text-xs text-gray-500 max-w-sm mx-auto">
-            Extracting project claims from your resume and generating grounded verification questions with Gemini.
+            Preparing grounded questions from your resume and selected interview settings.
           </p>
 
         </div>
@@ -668,9 +582,7 @@ export const QuestionsView: React.FC = () => {
           <button
             type="button"
             onClick={() =>
-              navigate(
-                '/app/prepare'
-              )
+              navigate('/app/prepare')
             }
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-full text-xs font-semibold shadow-lg shadow-indigo-100 transition-all flex items-center gap-2 mx-auto"
           >
@@ -737,9 +649,7 @@ export const QuestionsView: React.FC = () => {
 
               return (
                 <div
-                  key={
-                    questionId
-                  }
+                  key={questionId}
                   className="p-6 sm:p-7 rounded-[32px] bg-white border border-gray-100 shadow-sm hover:border-indigo-100 transition-all space-y-5"
                 >
 
@@ -902,7 +812,6 @@ export const QuestionsView: React.FC = () => {
                         </div>
 
                         <div>
-
                           <span className="text-[10px] font-mono text-white/50 uppercase block mb-1">
                             Exact Resume Evidence Snippet
                           </span>
@@ -918,7 +827,6 @@ export const QuestionsView: React.FC = () => {
                             "
 
                           </div>
-
                         </div>
 
                         <div className="text-[11px] text-white/60 flex items-center justify-between pt-1">
@@ -949,10 +857,8 @@ export const QuestionsView: React.FC = () => {
                       Focus:{' '}
 
                       <strong className="text-gray-700">
-
                         {question.focus ||
                           'General'}
-
                       </strong>
 
                     </span>

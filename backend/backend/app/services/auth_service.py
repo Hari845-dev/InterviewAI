@@ -1,6 +1,5 @@
 from fastapi import HTTPException
 
-from app.ai.gemini_orchestrator import get_gemini_orchestrator
 from app.database import get_db
 from app.schemas.auth import TokenResponse, UserLogin, UserRegister
 from app.schemas.resume import StructuredProfile

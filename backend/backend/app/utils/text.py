@@ -73,16 +73,32 @@ SKILL_ALIASES: dict[str, str] = {
     # --------------------------------------------------------
     # React
     # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    # normalize_skill_raw() returns "reactjs".
+    # The database alias layer can then map:
+    #
+    # reactjs -> react
+    #
+    # This preserves the two-stage normalization design.
+    # --------------------------------------------------------
 
-    "reactjs": "react",
-    "react.js": "react",
+    "reactjs": "reactjs",
 
     # --------------------------------------------------------
     # Node
     # --------------------------------------------------------
+    #
+    # normalize_skill_raw() returns "nodejs".
+    # The database alias layer can then map:
+    #
+    # nodejs -> node
+    #
+    # This is required by the existing alias tests.
+    # --------------------------------------------------------
 
-    "nodejs": "node.js",
-    "node": "node.js",
+    "nodejs": "nodejs",
+    "node": "nodejs",
 
     # --------------------------------------------------------
     # PostgreSQL
@@ -97,6 +113,7 @@ SKILL_ALIASES: dict[str, str] = {
     # --------------------------------------------------------
 
     "mongo": "mongodb",
+    "mongodb": "mongodb",
 
     # --------------------------------------------------------
     # Kubernetes
@@ -256,15 +273,17 @@ def normalize_skill_raw(skill: str) -> str:
     """
     Convert a skill into a stable comparison key.
 
-    Important:
-    punctuation/separators such as spaces and hyphens are
-    normalized so logically equivalent values compare equally.
+    This function performs only deterministic formatting/
+    normalization. Database-backed aliases are resolved later
+    by SkillNormalizationService.
 
     Examples:
 
         React.js
             -> reactjs
-            -> react
+
+        node.js
+            -> nodejs
 
         Postgres
             -> postgresql
@@ -273,9 +292,6 @@ def normalize_skill_raw(skill: str) -> str:
             -> kubernetes
 
         Object-Oriented Programming (OOP)
-            -> objectorientedprogrammingoop
-
-        object orientedprogrammingoop
             -> objectorientedprogrammingoop
     """
 
@@ -293,8 +309,8 @@ def normalize_skill_raw(skill: str) -> str:
         .replace("`", "")
     )
 
-    # Remove parentheses and other punctuation,
-    # but keep #, + and hyphen temporarily.
+    # Preserve characters needed by technical names while
+    # removing unrelated punctuation.
     skill = re.sub(
         r"[^\w\s.#+\-/]",
         "",
@@ -302,12 +318,6 @@ def normalize_skill_raw(skill: str) -> str:
     )
 
     # Treat hyphens and underscores as separators.
-    # This fixes:
-    #
-    # object-oriented
-    # object oriented
-    #
-    # becoming the same comparison key.
     skill = skill.replace(
         "-",
         " ",
@@ -325,14 +335,14 @@ def normalize_skill_raw(skill: str) -> str:
         skill,
     ).strip()
 
-    # Remove dots and spaces for the comparison key.
+    # Remove dots/spaces for the comparison key.
     compact = (
         skill
         .replace(".", "")
         .replace(" ", "")
     )
 
-    # Direct alias.
+    # Resolve deterministic aliases.
     canonical = SKILL_ALIASES.get(
         compact
     )

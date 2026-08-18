@@ -1,14 +1,12 @@
+import asyncio
 import json
 import re
-from datetime import datetime, timedelta
 from typing import Any
 
-import google.generativeai as genai
 from fastapi import HTTPException
+from groq import Groq
 
 from app.config.settings import get_settings
-from app.database import get_db
-from app.utils.text import utcnow
 
 
 GENERATION_SYSTEM_PROMPT = """You are an interview-question generation engine.
@@ -57,64 +55,32 @@ CRITICAL RULES:
 12. Return ONLY valid JSON as specified in the task."""
 
 
-class GeminiOrchestrator:
+class GroqOrchestrator:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._keys = self.settings.gemini_api_keys
-        self._index = 0
-        self._cooldowns: dict[str, datetime] = {}
+
+        self._api_key = (
+            self.settings.groq_api_key.strip()
+        )
+
+        self._model = (
+            self.settings.groq_model.strip()
+        )
+
+        self._client: Groq | None = None
+
+        if self._api_key:
+            self._client = Groq(
+                api_key=self._api_key
+            )
 
     @property
     def provider_name(self) -> str:
-        return "gemini"
+        return "groq"
 
     @property
     def is_available(self) -> bool:
-        return len(self._keys) > 0
-
-    def _next_key(self) -> str | None:
-        if not self._keys:
-            return None
-
-        now = utcnow()
-
-        for _ in range(len(self._keys)):
-            key = self._keys[
-                self._index % len(self._keys)
-            ]
-            self._index += 1
-
-            cooldown = self._cooldowns.get(key)
-
-            if cooldown is None or cooldown <= now:
-                return key
-
-        return None
-
-    async def _mark_cooldown(
-        self,
-        key: str,
-    ) -> None:
-        self._cooldowns[key] = (
-            utcnow() + timedelta(minutes=2)
-        )
-
-        db = get_db()
-
-        key_id = (
-            f"key_{self._keys.index(key) + 1}"
-        )
-
-        await db.gemini_key_state.update_one(
-            {"key_id": key_id},
-            {
-                "$set": {
-                    "cooldown_until":
-                        self._cooldowns[key]
-                }
-            },
-            upsert=True,
-        )
+        return self._client is not None
 
     def _is_answer_evaluation(
         self,
@@ -122,15 +88,10 @@ class GeminiOrchestrator:
         task_type: str | None,
     ) -> bool:
         """
-        Determine whether this request is an answer-evaluation task.
+        Determine whether the request is an answer evaluation.
 
-        task_type can explicitly be:
-            answer_evaluation
-            generation
-
-        For backward compatibility with existing services that only
-        provide task_prompt/context, the method also recognizes the
-        current evaluation prompt automatically.
+        Existing service calls can omit task_type because we also
+        recognize the current evaluation prompt automatically.
         """
 
         if task_type:
@@ -169,9 +130,9 @@ class GeminiOrchestrator:
         task_type: str | None = None,
     ) -> tuple[dict | list, int]:
         """
-        Generate structured JSON using Gemini.
+        Generate structured JSON using Groq.
 
-        task_type is optional so existing service calls remain compatible.
+        task_type is optional so existing services remain compatible.
 
         Supported task types:
             - generation
@@ -184,11 +145,11 @@ class GeminiOrchestrator:
             )
         """
 
-        if not self._keys:
+        if not self._client:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "Gemini API keys not configured"
+                    "Groq API key not configured"
                 ),
             )
 
@@ -223,89 +184,111 @@ class GeminiOrchestrator:
             else 0.2
         )
 
-        last_error: Exception | None = None
+        try:
+            response = await asyncio.to_thread(
+                self._generate,
+                system_prompt,
+                full_prompt,
+                temperature,
+            )
 
-        for _ in range(len(self._keys)):
-            key = self._next_key()
+            text = (
+                response.choices[0]
+                .message
+                .content
+                or ""
+            )
 
-            if not key:
-                break
+            parsed = self._parse_json(
+                text
+            )
 
-            try:
-                genai.configure(
-                    api_key=key
-                )
+            return parsed, 1
 
-                model = genai.GenerativeModel(
-                    self.settings.gemini_model
-                )
+        except HTTPException:
+            raise
 
-                response = model.generate_content(
-                    full_prompt,
-                    generation_config={
-                        "response_mime_type":
-                            "application/json",
-                        "temperature":
-                            temperature,
-                    },
-                )
+        except Exception as exc:
+            error_text = str(
+                exc
+            ).lower()
 
-                text = response.text or ""
-
-                parsed = self._parse_json(
-                    text
-                )
-
-                return parsed, 1
-
-            except Exception as exc:
-                last_error = exc
-
-                error_text = str(
-                    exc
-                ).lower()
-
-                if (
-                    "404" in error_text
-                    and "model" in error_text
-                ):
-                    raise HTTPException(
-                        status_code=502,
-                        detail=(
-                            f"Gemini model "
-                            f"'{self.settings.gemini_model}' "
-                            "is not available. "
-                            "Use a supported model in .env "
-                            "and restart the backend."
-                        ),
-                    ) from exc
-
-                if (
-                    "429" in error_text
-                    or "quota" in error_text
-                    or "rate" in error_text
-                    or "resource exhausted"
-                    in error_text
-                ):
-                    await self._mark_cooldown(
-                        key
-                    )
-                    continue
-
+            if (
+                "401" in error_text
+                or "authentication" in error_text
+                or "invalid api key"
+                in error_text
+            ):
                 raise HTTPException(
                     status_code=502,
                     detail=(
-                        f"Gemini error: {exc}"
+                        "Groq API authentication failed."
                     ),
                 ) from exc
 
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "All Gemini API keys exhausted "
-                "or unavailable. Please retry shortly."
-            ),
-        ) from last_error
+            if (
+                "404" in error_text
+                and "model" in error_text
+            ):
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Groq model "
+                        f"'{self._model}' "
+                        "is not available."
+                    ),
+                ) from exc
+
+            if (
+                "429" in error_text
+                or "rate limit" in error_text
+                or "quota" in error_text
+                or "resource exhausted"
+                in error_text
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Groq rate limit or quota "
+                        "was reached. Please retry shortly."
+                    ),
+                ) from exc
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Groq error: {exc}"
+                ),
+            ) from exc
+
+    def _generate(
+        self,
+        system_prompt: str,
+        full_prompt: str,
+        temperature: float,
+    ):
+        if not self._client:
+            raise RuntimeError(
+                "Groq client is not configured"
+            )
+
+        return self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": full_prompt,
+                },
+            ],
+            temperature=temperature,
+            response_format={
+                "type": "json_object"
+            },
+        )
 
     def _parse_json(
         self,
@@ -333,23 +316,23 @@ class GeminiOrchestrator:
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Malformed Gemini JSON response"
+                    "Malformed Groq JSON response"
                 ),
             ) from exc
 
 
-_orchestrator: GeminiOrchestrator | None = None
+_orchestrator: GroqOrchestrator | None = None
 
 
-def get_gemini_orchestrator() -> GeminiOrchestrator:
+def get_groq_orchestrator() -> GroqOrchestrator:
     global _orchestrator
 
     if _orchestrator is None:
-        _orchestrator = GeminiOrchestrator()
+        _orchestrator = GroqOrchestrator()
 
     return _orchestrator
 
 
-def reset_gemini_orchestrator() -> None:
+def reset_groq_orchestrator() -> None:
     global _orchestrator
     _orchestrator = None

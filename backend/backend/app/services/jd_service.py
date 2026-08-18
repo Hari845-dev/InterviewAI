@@ -1,6 +1,6 @@
 from fastapi import HTTPException, UploadFile
 
-from app.ai.gemini_orchestrator import get_gemini_orchestrator
+from app.ai.ai_provider import get_ai_provider
 from app.database import get_db
 from app.schemas.jd import (
     JDProfileResponse,
@@ -236,7 +236,7 @@ class JDService:
         # 3. BASIC TEXT VALIDATION
         # ------------------------------------------------------
 
-        if len(raw_text.strip()) < 30:
+        if len(raw_text.strip()) <= 30:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1794,7 +1794,11 @@ class JDService:
         )
 
     # ==========================================================
-    # GEMINI JD EXTRACTION
+    # AI JD EXTRACTION
+    # ==========================================================
+
+    # ==========================================================
+    # AI JD EXTRACTION
     # ==========================================================
 
     async def _extract_jd(
@@ -1802,91 +1806,100 @@ class JDService:
         text: str,
     ) -> StructuredJD:
 
-        gemini = (
-            get_gemini_orchestrator()
-        )
+        if len(text.strip()) <= 30:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Job description text is too short "
+                    "or unreadable."
+                ),
+            )
 
-        if not gemini.is_available:
+        ai = get_ai_provider()
+
+        if not ai.is_available:
             return self._fallback_jd(
                 text
             )
 
         prompt = """
-Extract a structured job description from the supplied job description text.
+        Extract a structured job description from the supplied job description text.
 
-Return ONLY valid JSON:
+        Return ONLY valid JSON:
 
-{
-  "job_title": "string or null",
-  "company": "string or null",
-  "location": "string or null",
-  "employment_type": "string or null",
-  "experience_required": "string or null",
-  "salary_range": "string or null",
-  "summary": "string or null",
-  "required_skills": [],
-  "preferred_skills": [],
-  "responsibilities": [],
-  "qualifications": [],
-  "education_requirements": [],
-  "certifications": [],
-  "nice_to_have": [],
-  "other_requirements": []
-}
+        {
+        "job_title": "string or null",
+        "company": "string or null",
+        "location": "string or null",
+        "employment_type": "string or null",
+        "experience_required": "string or null",
+        "salary_range": "string or null",
+        "summary": "string or null",
+        "required_skills": [],
+        "preferred_skills": [],
+        "responsibilities": [],
+        "qualifications": [],
+        "education_requirements": [],
+        "certifications": [],
+        "nice_to_have": [],
+        "other_requirements": []
+        }
 
-Rules:
+        Rules:
 
-1. Extract only information explicitly present in the JD.
-2. Never invent technologies, qualifications, experience,
-   salary, company names, or responsibilities.
-3. Preserve readable skill names.
-4. Never concatenate separate words.
-5. Technical skills should remain concrete when possible.
-6. Broad competency requirements such as:
-   "Application Programming Languages",
-   "Database Management Systems",
-   "Web Application Development",
-   "Software Testing",
-   may remain as readable competency categories.
-7. Place mandatory technical/domain requirements in
-   required_skills.
-8. Place optional technical/domain requirements in
-   preferred_skills.
-9. Place communication, teamwork, leadership, collaboration
-   and similar soft skills in qualifications or
-   other_requirements unless the JD clearly treats them
-   as a technical requirement.
-10. Preserve responsibilities in responsibilities.
-11. Preserve education requirements in education_requirements.
-12. Preserve certifications in certifications.
-13. Return empty arrays when a section does not exist.
-14. Return null for missing scalar values.
-15. Return only JSON.
-"""
+        1. Extract only information explicitly present in the JD.
+        2. Never invent technologies, qualifications, experience,
+        salary, company names, or responsibilities.
+        3. Preserve readable skill names.
+        4. Never concatenate separate words.
+        5. Technical skills should remain concrete when possible.
+        6. Broad competency requirements such as:
+        "Application Programming Languages",
+        "Database Management Systems",
+        "Web Application Development",
+        "Software Testing",
+        may remain as readable competency categories.
+        7. Place mandatory technical/domain requirements in
+        required_skills.
+        8. Place optional technical/domain requirements in
+        preferred_skills.
+        9. Place communication, teamwork, leadership, collaboration
+        and similar soft skills in qualifications or
+        other_requirements unless the JD clearly treats them
+        as a technical requirement.
+        10. Preserve responsibilities in responsibilities.
+        11. Preserve education requirements in education_requirements.
+        12. Preserve certifications in certifications.
+        13. Return empty arrays when a section does not exist.
+        14. Return null for missing scalar values.
+        15. Return only JSON.
+       """
 
-        parsed, _ = (
-            await gemini.generate_json(
+        try:
+            parsed, _ = await ai.generate_json(
                 prompt,
                 {
-                    "jd_text":
-                        text[:15000]
+                    "jd_text": text[:15000]
                 },
             )
-        )
 
-        if isinstance(
-            parsed,
-            dict,
-        ):
-            return StructuredJD.model_validate(
-                parsed
+            if isinstance(
+                parsed,
+                dict,
+            ):
+                return StructuredJD.model_validate(
+                    parsed
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail="Invalid JD extraction response",
             )
 
-        raise HTTPException(
-            status_code=502,
-            detail="Invalid JD extraction response",
-        )
-
+        except HTTPException:
+            return self._fallback_jd(
+                text
+            )
     # ==========================================================
     # FALLBACK JD
     # ==========================================================

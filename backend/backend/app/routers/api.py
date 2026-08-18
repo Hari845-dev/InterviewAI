@@ -548,6 +548,20 @@ async def submit_answer(
         session_id,
         req,
     )
+@router.post(
+    "/sessions/{session_id}/answers",
+    response_model=SubmitAnswerResponse,
+)
+async def submit_answer_plural(
+    session_id: str,
+    req: SubmitAnswerRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    return await SessionService().submit_answer(
+        user_id,
+        session_id,
+        req,
+    )
 
 
 @router.get(
