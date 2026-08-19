@@ -5,71 +5,114 @@
  * - Bearer authentication
  * - configurable backend URL
  * - request timeouts
- * - caller-controlled AbortSignal cancellation
- * - clean distinction between user cancellation and timeout
+ * - caller-controlled cancellation
+ * - clean API error handling
  */
 
+const ENV_BACKEND_URL =
+  (
+    import.meta.env.VITE_API_URL as
+      | string
+      | undefined
+  )?.trim() || '';
+
 const DEFAULT_BACKEND_URL =
-  (import.meta.env.VITE_API_URL as string | undefined)?.trim() ||
+  ENV_BACKEND_URL ||
   'http://localhost:8000';
+
+
+function normalizeBaseUrl(
+  url: string
+): string {
+  return url
+    .trim()
+    .replace(/\/+$/, '');
+}
+
 
 export function getBaseApiUrl(): string {
   if (typeof window !== 'undefined') {
-    const custom = localStorage.getItem(
-      'interviewai_custom_api_url'
-    );
+    const custom =
+      localStorage.getItem(
+        'interviewai_custom_api_url'
+      );
 
-    if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, '');
+    if (
+      custom &&
+      custom.trim()
+    ) {
+      return normalizeBaseUrl(
+        custom
+      );
     }
   }
 
-  return DEFAULT_BACKEND_URL.replace(/\/+$/, '');
+  return normalizeBaseUrl(
+    DEFAULT_BACKEND_URL
+  );
 }
+
 
 export function setCustomApiUrl(
   url: string | null
 ): void {
-  if (typeof window !== 'undefined') {
-    if (url && url.trim()) {
-      localStorage.setItem(
-        'interviewai_custom_api_url',
-        url.trim()
-      );
-    } else {
-      localStorage.removeItem(
-        'interviewai_custom_api_url'
-      );
-    }
+  if (
+    typeof window === 'undefined'
+  ) {
+    return;
   }
-}
 
-export function getStoredToken(): string | null {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem(
-      'interviewai_token'
+  if (
+    url &&
+    url.trim()
+  ) {
+    localStorage.setItem(
+      'interviewai_custom_api_url',
+      normalizeBaseUrl(url)
+    );
+  } else {
+    localStorage.removeItem(
+      'interviewai_custom_api_url'
     );
   }
-
-  return null;
 }
+
+
+export function getStoredToken():
+  string | null {
+  if (
+    typeof window === 'undefined'
+  ) {
+    return null;
+  }
+
+  return localStorage.getItem(
+    'interviewai_token'
+  );
+}
+
 
 export function setStoredToken(
   token: string | null
 ): void {
-  if (typeof window !== 'undefined') {
-    if (token) {
-      localStorage.setItem(
-        'interviewai_token',
-        token
-      );
-    } else {
-      localStorage.removeItem(
-        'interviewai_token'
-      );
-    }
+  if (
+    typeof window === 'undefined'
+  ) {
+    return;
+  }
+
+  if (token) {
+    localStorage.setItem(
+      'interviewai_token',
+      token
+    );
+  } else {
+    localStorage.removeItem(
+      'interviewai_token'
+    );
   }
 }
+
 
 export interface RequestOptions
   extends RequestInit {
@@ -77,13 +120,16 @@ export interface RequestOptions
   skipAuth?: boolean;
 }
 
+
 export interface ErrorData {
   detail?: string | string[];
   message?: string;
   [key: string]: unknown;
 }
 
-export class ApiError extends Error {
+
+export class ApiError
+  extends Error {
   status: number;
   data?: ErrorData;
 
@@ -99,49 +145,115 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * Perform an HTTP request with:
- *
- * - automatic Authorization header
- * - automatic JSON Content-Type
- * - timeout protection
- * - caller cancellation
- */
+
+function buildRequestUrl(
+  endpoint: string
+): string {
+  if (
+    endpoint.startsWith(
+      'http://'
+    ) ||
+    endpoint.startsWith(
+      'https://'
+    )
+  ) {
+    return endpoint;
+  }
+
+  const baseUrl =
+    getBaseApiUrl();
+
+  const normalizedEndpoint =
+    endpoint.startsWith('/')
+      ? endpoint
+      : `/${endpoint}`;
+
+  return `${baseUrl}${normalizedEndpoint}`;
+}
+
+
+function extractErrorMessage(
+  errorData:
+    | ErrorData
+    | undefined,
+  status: number
+): string {
+  if (
+    errorData?.detail
+  ) {
+    if (
+      Array.isArray(
+        errorData.detail
+      )
+    ) {
+      return errorData.detail
+        .map(
+          (
+            item: unknown
+          ) => {
+            if (
+              typeof item ===
+                'object' &&
+              item !== null &&
+              'msg' in item
+            ) {
+              return String(
+                (
+                  item as {
+                    msg: unknown;
+                  }
+                ).msg
+              );
+            }
+
+            return String(
+              item
+            );
+          }
+        )
+        .join(', ');
+    }
+
+    return String(
+      errorData.detail
+    );
+  }
+
+  if (
+    errorData?.message
+  ) {
+    return String(
+      errorData.message
+    );
+  }
+
+  return `Request failed with status ${status}`;
+}
+
+
 export async function apiFetch<T>(
   endpoint: string,
   options: RequestOptions = {}
 ): Promise<T> {
-  const baseUrl = getBaseApiUrl();
-
-  const url = endpoint.startsWith('http')
-    ? endpoint
-    : `${baseUrl}${
-        endpoint.startsWith('/')
-          ? ''
-          : '/'
-      }${endpoint}`;
+  const url =
+    buildRequestUrl(
+      endpoint
+    );
 
   const timeoutMs =
-    options.timeout ?? 15000;
+    options.timeout ??
+    15000;
 
-  /*
-   * ==========================================================
-   * REQUEST CANCELLATION
-   * ==========================================================
-   *
-   * We use our own controller internally because we need to
-   * support BOTH:
-   *
-   * 1. automatic timeout
-   * 2. explicit caller cancellation
-   */
-  const internalController =
+  const controller =
     new AbortController();
 
-  const timeoutTimer =
-    window.setTimeout(() => {
-      internalController.abort();
-    }, timeoutMs);
+  const timeoutId =
+    window.setTimeout(
+      () => {
+        controller.abort();
+      },
+      timeoutMs
+    );
 
   const callerSignal =
     options.signal;
@@ -150,37 +262,41 @@ export async function apiFetch<T>(
     | (() => void)
     | undefined;
 
-  /*
-   * Connect caller signal -> internal controller.
-   */
-  if (callerSignal) {
-    if (callerSignal.aborted) {
-      internalController.abort();
+
+  if (
+    callerSignal
+  ) {
+    if (
+      callerSignal.aborted
+    ) {
+      controller.abort();
     } else {
-      callerAbortHandler = () => {
-        internalController.abort();
-      };
+      callerAbortHandler =
+        () => {
+          controller.abort();
+        };
 
       callerSignal.addEventListener(
         'abort',
         callerAbortHandler,
-        { once: true }
+        {
+          once: true,
+        }
       );
     }
   }
 
+
   const headers =
     new Headers(
-      options.headers || {}
+      options.headers ||
+        {}
     );
 
-  /*
-   * ==========================================================
-   * AUTH
-   * ==========================================================
-   */
 
-  if (!options.skipAuth) {
+  if (
+    !options.skipAuth
+  ) {
     const token =
       getStoredToken();
 
@@ -192,17 +308,16 @@ export async function apiFetch<T>(
     }
   }
 
-  /*
-   * ==========================================================
-   * CONTENT TYPE
-   * ==========================================================
-   *
-   * Never set application/json for FormData.
-   */
+
   if (
     options.body &&
-    !(options.body instanceof FormData) &&
-    !headers.has('Content-Type')
+    !(
+      options.body
+      instanceof FormData
+    ) &&
+    !headers.has(
+      'Content-Type'
+    )
   ) {
     headers.set(
       'Content-Type',
@@ -210,107 +325,70 @@ export async function apiFetch<T>(
     );
   }
 
+
   try {
     const response =
-      await fetch(url, {
-        ...options,
+      await fetch(
+        url,
+        {
+          ...options,
+          signal:
+            controller.signal,
+          headers,
+        }
+      );
 
-        /*
-         * Override the caller signal with the internal signal.
-         * The caller signal is bridged to this controller above.
-         */
-        signal:
-          internalController.signal,
 
-        headers,
-      });
-
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       let errorData:
         | ErrorData
         | undefined;
+
 
       try {
         errorData =
           await response.json();
       } catch {
         try {
+          const text =
+            await response.text();
+
           errorData = {
-            detail:
-              await response.text(),
+            detail: text,
           };
         } catch {
-          errorData = undefined;
+          errorData =
+            undefined;
         }
       }
 
-      let errorMessage =
-        'Request failed';
-
-      if (errorData?.detail) {
-        errorMessage =
-          Array.isArray(
-            errorData.detail
-          )
-            ? errorData.detail
-                .map(
-                  (
-                    item: unknown
-                  ) => {
-                    if (
-                      typeof item ===
-                        'object' &&
-                      item !== null &&
-                      'msg' in item
-                    ) {
-                      return String(
-                        (
-                          item as {
-                            msg: unknown;
-                          }
-                        ).msg
-                      );
-                    }
-
-                    return String(item);
-                  }
-                )
-                .join(', ')
-            : String(
-                errorData.detail
-              );
-      } else if (
-        errorData?.message
-      ) {
-        errorMessage =
-          String(
-            errorData.message
-          );
-      } else {
-        errorMessage =
-          `Request failed with status ${response.status}`;
-      }
 
       throw new ApiError(
-        errorMessage,
+        extractErrorMessage(
+          errorData,
+          response.status
+        ),
         response.status,
         errorData
       );
     }
 
+
     if (
-      response.status === 204
+      response.status ===
+      204
     ) {
       return {} as T;
     }
 
-    /*
-     * Some successful endpoints may return an empty body.
-     */
+
     const contentType =
       response.headers.get(
         'content-type'
       ) || '';
+
 
     if (
       !contentType.includes(
@@ -320,79 +398,74 @@ export async function apiFetch<T>(
       return {} as T;
     }
 
+
     return await response.json();
 
-  } catch (error: unknown) {
-    /*
-     * ========================================================
-     * USER CANCELLATION
-     * ========================================================
-     *
-     * Check callerSignal BEFORE checking generic AbortError.
-     *
-     * This prevents a user cancellation from being reported
-     * as a timeout.
-     */
+  } catch (
+    error: unknown
+  ) {
+
     if (
       callerSignal?.aborted
     ) {
       throw new ApiError(
-        'Upload cancelled.',
+        'Request cancelled.',
         499
       );
     }
 
-    /*
-     * ========================================================
-     * TIMEOUT
-     * ========================================================
-     */
+
     if (
-      error instanceof DOMException &&
-      error.name === 'AbortError'
+      error instanceof
+      DOMException &&
+      error.name ===
+        'AbortError'
     ) {
       throw new ApiError(
-        'Request timed out. Please check if the FastAPI server is running.',
+        'Request timed out. Please check that the backend server is running.',
         408
       );
     }
+
 
     if (
       error instanceof Error &&
-      error.name === 'AbortError'
+      error.name ===
+        'AbortError'
     ) {
       throw new ApiError(
-        'Request timed out. Please check if the FastAPI server is running.',
+        'Request timed out. Please check that the backend server is running.',
         408
       );
     }
 
-    /*
-     * ========================================================
-     * API ERROR
-     * ========================================================
-     */
+
     if (
-      error instanceof ApiError
+      error instanceof
+      ApiError
     ) {
       throw error;
     }
 
+
     const message =
       error instanceof Error
         ? error.message
-        : 'Unable to connect to backend server';
+        : 'Unable to connect to backend server.';
+
 
     throw new ApiError(
       message ||
-        'Unable to connect to backend server. Make sure the FastAPI service is running.',
+        'Unable to connect to backend server.',
       0
     );
 
   } finally {
+
     window.clearTimeout(
-      timeoutTimer
+      timeoutId
     );
+
 
     if (
       callerSignal &&

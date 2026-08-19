@@ -1,4 +1,5 @@
 from fastapi import HTTPException, UploadFile
+from pymongo.errors import DuplicateKeyError
 
 from app.ai.ai_provider import get_ai_provider
 from app.database import get_db
@@ -28,21 +29,6 @@ from app.utils.text import (
 
 class JDService:
 
-    # ==========================================================
-    # CATEGORY-BASED SEMANTIC SKILL GROUPS
-    # ==========================================================
-    #
-    # These are controlled mappings, not fuzzy guesses.
-    # They allow broad JD requirements such as:
-    #
-    #   "Application Programming Languages"
-    #
-    # to be supported by concrete resume skills such as:
-    #
-    #   Python, Java, C++, JavaScript, C#, TypeScript...
-    #
-    # ==========================================================
-
     CATEGORY_SKILLS: dict[str, set[str]] = {
         "applicationprogramminglanguages": {
             "python",
@@ -60,7 +46,6 @@ class JDService:
             "php",
             "swift",
         },
-
         "objectorientedprogrammingoop": {
             "java",
             "c++",
@@ -72,7 +57,6 @@ class JDService:
             "objectorientedprogrammingoop",
             "objectorientedprogramming",
         },
-
         "objectorientedprogramming": {
             "java",
             "c++",
@@ -84,7 +68,6 @@ class JDService:
             "objectorientedprogrammingoop",
             "objectorientedprogramming",
         },
-
         "databasemanagementsystems": {
             "mysql",
             "postgresql",
@@ -99,7 +82,6 @@ class JDService:
             "database",
             "sql",
         },
-
         "webapplicationdevelopment": {
             "react",
             "angular",
@@ -122,7 +104,6 @@ class JDService:
             "rest",
             "graphql",
         },
-
         "softwaretesting": {
             "pytest",
             "jest",
@@ -135,27 +116,23 @@ class JDService:
             "softwaretesting",
             "postman",
         },
-
         "cloudcomputing": {
             "aws",
             "azure",
             "gcp",
             "googlecloud",
         },
-
         "containerization": {
             "docker",
             "dockercompose",
             "kubernetes",
         },
-
         "versioncontrol": {
             "git",
             "github",
             "gitlab",
             "bitbucket",
         },
-
         "machinelearning": {
             "machinelearning",
             "tensorflow",
@@ -166,55 +143,34 @@ class JDService:
         },
     }
 
-    # ==========================================================
-    # HUMAN-READABLE CATEGORY NAMES
-    # ==========================================================
-
     CATEGORY_DISPLAY_NAMES: dict[str, str] = {
         "applicationprogramminglanguages":
             "Application Programming Languages",
-
         "objectorientedprogrammingoop":
             "Object-Oriented Programming (OOP)",
-
         "objectorientedprogramming":
             "Object-Oriented Programming",
-
         "databasemanagementsystems":
             "Database Management Systems",
-
         "webapplicationdevelopment":
             "Web Application Development",
-
         "softwaretesting":
             "Software Testing",
-
         "cloudcomputing":
             "Cloud Computing",
-
         "containerization":
             "Containerization",
-
         "versioncontrol":
             "Version Control",
-
         "machinelearning":
             "Machine Learning",
     }
-
-    # ==========================================================
-    # UPLOAD + PARSE JD
-    # ==========================================================
 
     async def upload_and_parse(
         self,
         user_id: str,
         file: UploadFile,
     ) -> JDProfileResponse:
-
-        # ------------------------------------------------------
-        # 1. FILE TYPE / SIZE VALIDATION
-        # ------------------------------------------------------
 
         content = await validate_upload(file)
 
@@ -223,20 +179,12 @@ class JDService:
             or "job-description.txt"
         )
 
-        # ------------------------------------------------------
-        # 2. EXTRACT TEXT
-        # ------------------------------------------------------
-
         raw_text = extract_text_from_bytes(
             content,
             filename,
         )
 
-        # ------------------------------------------------------
-        # 3. BASIC TEXT VALIDATION
-        # ------------------------------------------------------
-
-        if len(raw_text.strip()) <= 30:
+        if len(raw_text.strip()) < 30:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -244,21 +192,6 @@ class JDService:
                     "or unreadable."
                 ),
             )
-
-        # ------------------------------------------------------
-        # 4. JD DOCUMENT IDENTITY VALIDATION
-        # ------------------------------------------------------
-        #
-        # IMPORTANT:
-        #
-        # This validation happens BEFORE Gemini.
-        #
-        # Random PDFs, resumes, certificates, assessments,
-        # invoices, manuals, etc. are rejected here.
-        #
-        # Only documents that resemble an actual job
-        # description continue to Gemini extraction.
-        # ------------------------------------------------------
 
         validation = validate_jd_document(
             raw_text,
@@ -271,19 +204,11 @@ class JDService:
                 detail=validation.message,
             )
 
-        # ------------------------------------------------------
-        # 5. HASH VALIDATED JD
-        # ------------------------------------------------------
-
         jd_hash = hash_content(
             raw_text
         )
 
         db = get_db()
-
-        # ------------------------------------------------------
-        # 6. EXISTING JD
-        # ------------------------------------------------------
 
         cached = await db.jd_profiles.find_one(
             {
@@ -315,17 +240,9 @@ class JDService:
                 ),
             )
 
-        # ------------------------------------------------------
-        # 7. FRESH GEMINI EXTRACTION
-        # ------------------------------------------------------
-
         structured = await self._extract_jd(
             raw_text
         )
-
-        # ------------------------------------------------------
-        # 8. PRESERVE READABLE DISPLAY VALUES
-        # ------------------------------------------------------
 
         structured.required_skills = (
             self._clean_display_list(
@@ -345,29 +262,60 @@ class JDService:
             )
         )
 
-        # ------------------------------------------------------
-        # 9. STORE IN MONGODB
-        # ------------------------------------------------------
-
         now = utcnow()
 
         doc = {
             "user_id": user_id,
             "jd_hash": jd_hash,
             "filename": filename,
-            "structured_jd":
-                structured.model_dump(),
+            "structured_jd": structured.model_dump(),
             "created_at": now,
             "updated_at": now,
         }
 
-        await db.jd_profiles.insert_one(
-            doc
-        )
+        try:
+            await db.jd_profiles.insert_one(
+                doc
+            )
 
-        # ------------------------------------------------------
-        # 10. RESPONSE
-        # ------------------------------------------------------
+        except DuplicateKeyError:
+            cached = await db.jd_profiles.find_one(
+                {
+                    "user_id": user_id,
+                    "jd_hash": jd_hash,
+                }
+            )
+
+            if not cached:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This job description was uploaded "
+                        "concurrently. Please retry."
+                    ),
+                )
+
+            structured = StructuredJD(
+                **cached.get(
+                    "structured_jd",
+                    {},
+                )
+            )
+
+            return JDProfileResponse(
+                jd_hash=jd_hash,
+                filename=(
+                    cached.get(
+                        "filename"
+                    )
+                    or filename
+                ),
+                structured_jd=structured,
+                cached=True,
+                created_at=cached.get(
+                    "created_at"
+                ),
+            )
 
         return JDProfileResponse(
             jd_hash=jd_hash,
@@ -376,10 +324,6 @@ class JDService:
             cached=False,
             created_at=now,
         )
-
-    # ==========================================================
-    # GET JD
-    # ==========================================================
 
     async def get_structured_jd(
         self,
@@ -409,10 +353,6 @@ class JDService:
             )
         )
 
-    # ==========================================================
-    # LIST ALL JDS
-    # ==========================================================
-
     async def list_jds(
         self,
         user_id: str,
@@ -438,10 +378,6 @@ class JDService:
             async for doc in cursor
         ]
 
-    # ==========================================================
-    # DELETE JD
-    # ==========================================================
-
     async def delete_jd(
         self,
         user_id: str,
@@ -465,10 +401,6 @@ class JDService:
 
         return True
 
-    # ==========================================================
-    # MATCH RESUME WITH JD
-    # ==========================================================
-
     async def match_skills(
         self,
         user_id: str,
@@ -478,18 +410,10 @@ class JDService:
 
         db = get_db()
 
-        # ------------------------------------------------------
-        # LOAD RESUME
-        # ------------------------------------------------------
-
         profile = await ResumeService().get_profile(
             user_id,
             resume_hash,
         )
-
-        # ------------------------------------------------------
-        # LOAD JD
-        # ------------------------------------------------------
 
         jd_doc = await db.jd_profiles.find_one(
             {
@@ -515,10 +439,6 @@ class JDService:
             get_skill_normalization_service()
         )
 
-        # ======================================================
-        # RESUME SKILLS
-        # ======================================================
-
         raw_resume_skills = [
             str(skill).strip()
             for skill in (
@@ -533,7 +453,6 @@ class JDService:
         ] = {}
 
         for raw_skill in raw_resume_skills:
-
             normalized = await normalizer.normalize(
                 raw_skill
             )
@@ -550,19 +469,12 @@ class JDService:
             resume_skill_map.keys()
         )
 
-        # ======================================================
-        # JD REQUIRED SKILLS
-        # ======================================================
-
         required_map: dict[
             str,
             str,
         ] = {}
 
-        for raw_skill in (
-            jd.required_skills
-        ):
-
+        for raw_skill in jd.required_skills:
             normalized = await normalizer.normalize(
                 raw_skill
             )
@@ -578,19 +490,12 @@ class JDService:
             required_map.keys()
         )
 
-        # ======================================================
-        # JD PREFERRED SKILLS
-        # ======================================================
-
         preferred_map: dict[
             str,
             str,
         ] = {}
 
-        for raw_skill in (
-            jd.preferred_skills
-        ):
-
+        for raw_skill in jd.preferred_skills:
             normalized = await normalizer.normalize(
                 raw_skill
             )
@@ -605,10 +510,6 @@ class JDService:
         preferred = set(
             preferred_map.keys()
         )
-
-        # ======================================================
-        # EVIDENCE INDEX
-        # ======================================================
 
         evidence_index = (
             self._build_resume_evidence_index(
@@ -628,10 +529,6 @@ class JDService:
         partial_display: list[str] = []
         missing_display: list[str] = []
 
-        # ======================================================
-        # REQUIRED SKILL EVALUATION
-        # ======================================================
-
         for normalized_skill in sorted(
             required
         ):
@@ -640,12 +537,7 @@ class JDService:
                 normalized_skill
             ]
 
-            # --------------------------------------------------
-            # 1. EXACT MATCH
-            # --------------------------------------------------
-
             if normalized_skill in resume_skills:
-
                 matched_required.add(
                     normalized_skill
                 )
@@ -684,10 +576,6 @@ class JDService:
 
                 continue
 
-            # --------------------------------------------------
-            # 2. CATEGORY MATCH
-            # --------------------------------------------------
-
             category_match = (
                 self._find_category_match(
                     normalized_skill,
@@ -697,7 +585,6 @@ class JDService:
             )
 
             if category_match:
-
                 matched_required.add(
                     normalized_skill
                 )
@@ -726,10 +613,6 @@ class JDService:
 
                 continue
 
-            # --------------------------------------------------
-            # 3. PROJECT / EXPERIENCE PARTIAL EVIDENCE
-            # --------------------------------------------------
-
             partial = (
                 self._find_partial_category_evidence(
                     normalized_skill,
@@ -740,7 +623,6 @@ class JDService:
             )
 
             if partial:
-
                 partial_required.add(
                     normalized_skill
                 )
@@ -753,23 +635,13 @@ class JDService:
                     SkillEvidence(
                         skill=display_skill,
                         status="partial",
-                        evidence_type=(
-                            partial["type"]
-                        ),
-                        evidence=(
-                            partial["text"]
-                        ),
-                        confidence=(
-                            partial["confidence"]
-                        ),
+                        evidence_type=partial["type"],
+                        evidence=partial["text"],
+                        confidence=partial["confidence"],
                     )
                 )
 
                 continue
-
-            # --------------------------------------------------
-            # 4. MISSING
-            # --------------------------------------------------
 
             missing_required.add(
                 normalized_skill
@@ -793,10 +665,6 @@ class JDService:
                 )
             )
 
-        # ======================================================
-        # PREFERRED SKILLS
-        # ======================================================
-
         weak_display: list[str] = []
 
         for normalized_skill in sorted(
@@ -808,7 +676,6 @@ class JDService:
             ]
 
             if normalized_skill in resume_skills:
-
                 evidence = (
                     self._find_skill_evidence(
                         normalized_skill,
@@ -838,7 +705,6 @@ class JDService:
                 )
 
             else:
-
                 category_match = (
                     self._find_category_match(
                         normalized_skill,
@@ -848,7 +714,6 @@ class JDService:
                 )
 
                 if category_match:
-
                     skill_evidence.append(
                         SkillEvidence(
                             skill=display_skill,
@@ -864,7 +729,6 @@ class JDService:
                     )
 
                 else:
-
                     partial = (
                         self._find_partial_category_evidence(
                             normalized_skill,
@@ -875,52 +739,26 @@ class JDService:
                     )
 
                     if partial:
-
                         skill_evidence.append(
                             SkillEvidence(
                                 skill=display_skill,
                                 status="partial",
-                                evidence_type=(
-                                    partial["type"]
-                                ),
-                                evidence=(
-                                    partial["text"]
-                                ),
-                                confidence=(
-                                    partial["confidence"]
-                                ),
+                                evidence_type=partial["type"],
+                                evidence=partial["text"],
+                                confidence=partial["confidence"],
                             )
                         )
 
                     else:
-
                         weak_display.append(
                             display_skill
                         )
 
-        # ======================================================
-        # REQUIRED MATCH PERCENTAGE
-        # ======================================================
-        #
-        # Exact/category MATCH = full credit
-        # Partial = half credit
-        # Missing = zero
-        #
-        # This prevents a partial match from being treated
-        # identically to a fully verified skill.
-        # ======================================================
-
         if required:
-
             weighted_score = (
-                len(
-                    matched_required
-                )
-                +
-                (
-                    len(
-                        partial_required
-                    )
+                len(matched_required)
+                + (
+                    len(partial_required)
                     * 0.5
                 )
             )
@@ -928,20 +766,13 @@ class JDService:
             required_match_percentage = round(
                 (
                     weighted_score
-                    /
-                    len(required)
+                    / len(required)
                 )
                 * 100,
                 1,
             )
-
         else:
-
             required_match_percentage = 0.0
-
-        # ======================================================
-        # RESUME DISPLAY SKILLS
-        # ======================================================
 
         resume_display = sorted(
             {
@@ -952,56 +783,30 @@ class JDService:
             }
         )
 
-        # ======================================================
-        # RETURN
-        # ======================================================
-
         return SkillMatchResponse(
             resume_hash=resume_hash,
             jd_hash=jd_hash,
-
             matched_skills=sorted(
-                set(
-                    matched_display
-                )
+                set(matched_display)
             ),
-
             missing_skills=sorted(
-                set(
-                    missing_display
-                )
+                set(missing_display)
             ),
-
             weak_areas=sorted(
-                set(
-                    weak_display
-                )
+                set(weak_display)
             ),
-
             resume_skills=resume_display,
-
             jd_required_skills=sorted(
-                set(
-                    required_map.values()
-                )
+                set(required_map.values())
             ),
-
             skill_evidence=skill_evidence,
-
             partial_skills=sorted(
-                set(
-                    partial_display
-                )
+                set(partial_display)
             ),
-
             required_match_percentage=(
                 required_match_percentage
             ),
         )
-
-    # ==========================================================
-    # CATEGORY MATCH
-    # ==========================================================
 
     def _find_category_match(
         self,
@@ -1022,15 +827,11 @@ class JDService:
         supporting: list[str] = []
 
         for skill in category_members:
-
-            canonical = (
-                normalize_skill_raw(
-                    skill
-                )
+            canonical = normalize_skill_raw(
+                skill
             )
 
             if canonical in resume_skills:
-
                 supporting.extend(
                     resume_skill_map.get(
                         canonical,
@@ -1044,8 +845,6 @@ class JDService:
             )
         )
 
-        # One strong concrete technology is enough
-        # to establish category support.
         if supporting:
             return {
                 "supporting_skills":
@@ -1053,10 +852,6 @@ class JDService:
             }
 
         return None
-
-    # ==========================================================
-    # PARTIAL CATEGORY EVIDENCE
-    # ==========================================================
 
     def _find_partial_category_evidence(
         self,
@@ -1075,11 +870,7 @@ class JDService:
         if not category_members:
             return None
 
-        # Look for contextual evidence where the actual
-        # technology was not extracted as a direct skill
-        # but appears in project/experience text.
         for evidence in evidence_index:
-
             text = str(
                 evidence.get(
                     "text",
@@ -1092,11 +883,8 @@ class JDService:
             )
 
             for skill in category_members:
-
-                canonical = (
-                    normalize_skill_raw(
-                        skill
-                    )
+                canonical = normalize_skill_raw(
+                    skill
                 )
 
                 if (
@@ -1104,7 +892,6 @@ class JDService:
                     and canonical
                     in compact_text
                 ):
-
                     return {
                         "type":
                             evidence.get(
@@ -1123,10 +910,6 @@ class JDService:
 
         return None
 
-    # ==========================================================
-    # BUILD RESUME EVIDENCE INDEX
-    # ==========================================================
-
     def _build_resume_evidence_index(
         self,
         profile,
@@ -1134,14 +917,9 @@ class JDService:
 
         evidence_index: list[dict] = []
 
-        # ------------------------------------------------------
-        # SKILLS
-        # ------------------------------------------------------
-
         for skill in (
             profile.skills or []
         ):
-
             skill_text = str(
                 skill
             ).strip()
@@ -1164,14 +942,9 @@ class JDService:
                 }
             )
 
-        # ------------------------------------------------------
-        # PROJECTS
-        # ------------------------------------------------------
-
         for project in (
             profile.projects or []
         ):
-
             project_title = getattr(
                 project,
                 "title",
@@ -1206,16 +979,12 @@ class JDService:
 
             if project_title:
                 text_parts.append(
-                    str(
-                        project_title
-                    )
+                    str(project_title)
                 )
 
             if description:
                 text_parts.append(
-                    str(
-                        description
-                    )
+                    str(description)
                 )
 
             if tech_stack:
@@ -1258,7 +1027,6 @@ class JDService:
             ]
 
             if full_text:
-
                 evidence_index.append(
                     {
                         "type": "project",
@@ -1268,14 +1036,9 @@ class JDService:
                     }
                 )
 
-        # ------------------------------------------------------
-        # EXPERIENCE
-        # ------------------------------------------------------
-
         for experience in (
             profile.experience or []
         ):
-
             role = getattr(
                 experience,
                 "role",
@@ -1304,16 +1067,12 @@ class JDService:
 
             if role:
                 text_parts.append(
-                    str(
-                        role
-                    )
+                    str(role)
                 )
 
             if company:
                 text_parts.append(
-                    str(
-                        company
-                    )
+                    str(company)
                 )
 
             if responsibilities:
@@ -1337,7 +1096,6 @@ class JDService:
             ).strip()
 
             if full_text:
-
                 evidence_index.append(
                     {
                         "type": "experience",
@@ -1346,14 +1104,9 @@ class JDService:
                     }
                 )
 
-        # ------------------------------------------------------
-        # EDUCATION
-        # ------------------------------------------------------
-
         for education in (
             profile.education or []
         ):
-
             degree = getattr(
                 education,
                 "degree",
@@ -1376,23 +1129,17 @@ class JDService:
 
             if degree:
                 text_parts.append(
-                    str(
-                        degree
-                    )
+                    str(degree)
                 )
 
             if institution:
                 text_parts.append(
-                    str(
-                        institution
-                    )
+                    str(institution)
                 )
 
             if year:
                 text_parts.append(
-                    str(
-                        year
-                    )
+                    str(year)
                 )
 
             full_text = " ".join(
@@ -1400,7 +1147,6 @@ class JDService:
             ).strip()
 
             if full_text:
-
                 evidence_index.append(
                     {
                         "type": "education",
@@ -1409,14 +1155,9 @@ class JDService:
                     }
                 )
 
-        # ------------------------------------------------------
-        # CERTIFICATIONS
-        # ------------------------------------------------------
-
         for certification in (
             profile.certifications or []
         ):
-
             if isinstance(
                 certification,
                 str,
@@ -1424,7 +1165,6 @@ class JDService:
                 full_text = (
                     certification.strip()
                 )
-
             else:
                 name = getattr(
                     certification,
@@ -1444,7 +1184,7 @@ class JDService:
                     None,
                 )
 
-                text_parts = []
+                text_parts: list[str] = []
 
                 if name:
                     text_parts.append(
@@ -1466,22 +1206,15 @@ class JDService:
                 ).strip()
 
             if full_text:
-
                 evidence_index.append(
                     {
-                        "type":
-                            "certification",
-                        "text":
-                            full_text,
+                        "type": "certification",
+                        "text": full_text,
                         "skills": [],
                     }
                 )
 
         return evidence_index
-
-    # ==========================================================
-    # FIND DIRECT SKILL EVIDENCE
-    # ==========================================================
 
     def _find_skill_evidence(
         self,
@@ -1490,7 +1223,6 @@ class JDService:
     ) -> dict | None:
 
         for evidence in evidence_index:
-
             if normalized_skill in (
                 evidence.get(
                     "skills",
@@ -1501,10 +1233,6 @@ class JDService:
 
         return None
 
-    # ==========================================================
-    # CLEAN DISPLAY LIST
-    # ==========================================================
-
     def _clean_display_list(
         self,
         values: list[str],
@@ -1514,11 +1242,8 @@ class JDService:
         seen: set[str] = set()
 
         for value in values:
-
-            readable = (
-                self._display_skill(
-                    value
-                )
+            readable = self._display_skill(
+                value
             )
 
             if not readable:
@@ -1534,16 +1259,9 @@ class JDService:
                 continue
 
             seen.add(key)
-
-            result.append(
-                readable
-            )
+            result.append(readable)
 
         return result
-
-    # ==========================================================
-    # DISPLAY SKILL
-    # ==========================================================
 
     def _display_skill(
         self,
@@ -1557,6 +1275,9 @@ class JDService:
             skill
         ).strip()
 
+        if not value:
+            return ""
+
         lowered = (
             value
             .lower()
@@ -1564,210 +1285,95 @@ class JDService:
         )
 
         known = {
-            "react":
-                "React",
-            "reactjs":
-                "React",
-            "react.js":
-                "React",
-
-            "node":
-                "Node.js",
-            "nodejs":
-                "Node.js",
-            "node.js":
-                "Node.js",
-
-            "postgres":
-                "PostgreSQL",
-            "postgresql":
-                "PostgreSQL",
-            "psql":
-                "PostgreSQL",
-
-            "mongodb":
-                "MongoDB",
-            "mongo":
-                "MongoDB",
-
-            "k8s":
-                "Kubernetes",
-            "kubernetes":
-                "Kubernetes",
-
-            "python":
-                "Python",
-            "python3":
-                "Python",
-            "py":
-                "Python",
-
-            "javascript":
-                "JavaScript",
-            "javascriptes6":
-                "JavaScript",
-            "js":
-                "JavaScript",
-
-            "typescript":
-                "TypeScript",
-            "ts":
-                "TypeScript",
-
-            "fastapi":
-                "FastAPI",
-            "django":
-                "Django",
-            "flask":
-                "Flask",
-
-            "docker":
-                "Docker",
-            "dockercompose":
-                "Docker Compose",
-
-            "aws":
-                "AWS",
-            "amazonwebservices":
-                "AWS",
-
-            "gcp":
-                "Google Cloud",
-            "googlecloud":
-                "Google Cloud",
-
-            "azure":
-                "Azure",
-            "microsoftazure":
-                "Azure",
-
-            "redis":
-                "Redis",
-
-            "sql":
-                "SQL",
-            "mysql":
-                "MySQL",
-            "sqlserver":
-                "SQL Server",
-
-            "csharp":
-                "C#",
-            "c#":
-                "C#",
-
-            "cpp":
-                "C++",
-            "cplusplus":
-                "C++",
-            "c++":
-                "C++",
-
-            "java":
-                "Java",
-
-            "kotlin":
-                "Kotlin",
-
-            "golang":
-                "Go",
-            "go":
-                "Go",
-
-            "html":
-                "HTML",
-            "css":
-                "CSS",
-
-            "graphql":
-                "GraphQL",
-
-            "rest":
-                "REST APIs",
-            "restapi":
-                "REST APIs",
-            "restapis":
-                "REST APIs",
-
-            "github":
-                "GitHub",
-            "gitlab":
-                "GitLab",
-            "git":
-                "Git",
-
-            "kafka":
-                "Apache Kafka",
-            "apachekafka":
-                "Apache Kafka",
-
-            "rabbitmq":
-                "RabbitMQ",
-
-            "pytest":
-                "PyTest",
-
-            "jest":
-                "Jest",
-
-            "junit":
-                "JUnit",
-
-            "selenium":
-                "Selenium",
-
-            "pandas":
-                "Pandas",
-
-            "numpy":
-                "NumPy",
-
-            "sklearn":
-                "scikit-learn",
-            "scikitlearn":
-                "scikit-learn",
-            "scikit-learn":
-                "scikit-learn",
-
-            "tensorflow":
-                "TensorFlow",
-
-            "pytorch":
-                "PyTorch",
-
-            "machinelearning":
-                "Machine Learning",
-
+            "react": "React",
+            "reactjs": "React",
+            "react.js": "React",
+            "node": "Node.js",
+            "nodejs": "Node.js",
+            "node.js": "Node.js",
+            "postgres": "PostgreSQL",
+            "postgresql": "PostgreSQL",
+            "psql": "PostgreSQL",
+            "mongodb": "MongoDB",
+            "mongo": "MongoDB",
+            "k8s": "Kubernetes",
+            "kubernetes": "Kubernetes",
+            "python": "Python",
+            "python3": "Python",
+            "py": "Python",
+            "javascript": "JavaScript",
+            "javascriptes6": "JavaScript",
+            "js": "JavaScript",
+            "typescript": "TypeScript",
+            "ts": "TypeScript",
+            "fastapi": "FastAPI",
+            "django": "Django",
+            "flask": "Flask",
+            "docker": "Docker",
+            "dockercompose": "Docker Compose",
+            "aws": "AWS",
+            "amazonwebservices": "AWS",
+            "gcp": "Google Cloud",
+            "googlecloud": "Google Cloud",
+            "azure": "Azure",
+            "microsoftazure": "Azure",
+            "redis": "Redis",
+            "sql": "SQL",
+            "mysql": "MySQL",
+            "sqlserver": "SQL Server",
+            "csharp": "C#",
+            "c#": "C#",
+            "cpp": "C++",
+            "cplusplus": "C++",
+            "c++": "C++",
+            "java": "Java",
+            "kotlin": "Kotlin",
+            "golang": "Go",
+            "go": "Go",
+            "html": "HTML",
+            "css": "CSS",
+            "graphql": "GraphQL",
+            "rest": "REST APIs",
+            "restapi": "REST APIs",
+            "restapis": "REST APIs",
+            "github": "GitHub",
+            "gitlab": "GitLab",
+            "git": "Git",
+            "kafka": "Apache Kafka",
+            "apachekafka": "Apache Kafka",
+            "rabbitmq": "RabbitMQ",
+            "pytest": "PyTest",
+            "jest": "Jest",
+            "junit": "JUnit",
+            "selenium": "Selenium",
+            "pandas": "Pandas",
+            "numpy": "NumPy",
+            "sklearn": "scikit-learn",
+            "scikitlearn": "scikit-learn",
+            "scikit-learn": "scikit-learn",
+            "tensorflow": "TensorFlow",
+            "pytorch": "PyTorch",
+            "machinelearning": "Machine Learning",
             "artificialintelligence":
                 "Artificial Intelligence",
-
             "naturallanguageprocessing":
                 "Natural Language Processing",
-
             "objectorientedprogrammingoop":
                 "Object-Oriented Programming (OOP)",
-
             "objectorientedprogramming":
                 "Object-Oriented Programming",
-
             "applicationprogramminglanguages":
                 "Application Programming Languages",
-
             "databasemanagementsystems":
                 "Database Management Systems",
-
             "webapplicationdevelopment":
                 "Web Application Development",
-
             "softwaretesting":
                 "Software Testing",
-
             "communicationskills":
                 "Communication Skills",
-
             "problemsolving":
                 "Problem Solving",
-
             "systemdesign":
                 "System Design",
         }
@@ -1793,25 +1399,17 @@ class JDService:
             .strip()
         )
 
-    # ==========================================================
-    # AI JD EXTRACTION
-    # ==========================================================
-
-    # ==========================================================
-    # AI JD EXTRACTION
-    # ==========================================================
-
     async def _extract_jd(
         self,
         text: str,
     ) -> StructuredJD:
 
-        if len(text.strip()) <= 30:
+        if len(text.strip()) < 31:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "Job description text is too short "
-                    "or unreadable."
+                    "to extract a structured JD."
                 ),
             )
 
@@ -1823,57 +1421,57 @@ class JDService:
             )
 
         prompt = """
-        Extract a structured job description from the supplied job description text.
+Extract a structured job description from the supplied job description text.
 
-        Return ONLY valid JSON:
+Return ONLY valid JSON:
 
-        {
-        "job_title": "string or null",
-        "company": "string or null",
-        "location": "string or null",
-        "employment_type": "string or null",
-        "experience_required": "string or null",
-        "salary_range": "string or null",
-        "summary": "string or null",
-        "required_skills": [],
-        "preferred_skills": [],
-        "responsibilities": [],
-        "qualifications": [],
-        "education_requirements": [],
-        "certifications": [],
-        "nice_to_have": [],
-        "other_requirements": []
-        }
+{
+  "job_title": "string or null",
+  "company": "string or null",
+  "location": "string or null",
+  "employment_type": "string or null",
+  "experience_required": "string or null",
+  "salary_range": "string or null",
+  "summary": "string or null",
+  "required_skills": [],
+  "preferred_skills": [],
+  "responsibilities": [],
+  "qualifications": [],
+  "education_requirements": [],
+  "certifications": [],
+  "nice_to_have": [],
+  "other_requirements": []
+}
 
-        Rules:
+Rules:
 
-        1. Extract only information explicitly present in the JD.
-        2. Never invent technologies, qualifications, experience,
-        salary, company names, or responsibilities.
-        3. Preserve readable skill names.
-        4. Never concatenate separate words.
-        5. Technical skills should remain concrete when possible.
-        6. Broad competency requirements such as:
-        "Application Programming Languages",
-        "Database Management Systems",
-        "Web Application Development",
-        "Software Testing",
-        may remain as readable competency categories.
-        7. Place mandatory technical/domain requirements in
-        required_skills.
-        8. Place optional technical/domain requirements in
-        preferred_skills.
-        9. Place communication, teamwork, leadership, collaboration
-        and similar soft skills in qualifications or
-        other_requirements unless the JD clearly treats them
-        as a technical requirement.
-        10. Preserve responsibilities in responsibilities.
-        11. Preserve education requirements in education_requirements.
-        12. Preserve certifications in certifications.
-        13. Return empty arrays when a section does not exist.
-        14. Return null for missing scalar values.
-        15. Return only JSON.
-       """
+1. Extract only information explicitly present in the JD.
+2. Never invent technologies, qualifications, experience,
+   salary, company names, or responsibilities.
+3. Preserve readable skill names.
+4. Never concatenate separate words.
+5. Technical skills should remain concrete when possible.
+6. Broad competency requirements such as:
+   "Application Programming Languages",
+   "Database Management Systems",
+   "Web Application Development",
+   "Software Testing",
+   may remain as readable competency categories.
+7. Place mandatory technical/domain requirements in
+   required_skills.
+8. Place optional technical/domain requirements in
+   preferred_skills.
+9. Place communication, teamwork, leadership, collaboration
+   and similar soft skills in qualifications or
+   other_requirements unless the JD clearly treats them
+   as a technical requirement.
+10. Preserve responsibilities in responsibilities.
+11. Preserve education requirements in education_requirements.
+12. Preserve certifications in certifications.
+13. Return empty arrays when a section does not exist.
+14. Return null for missing scalar values.
+15. Return only JSON.
+"""
 
         try:
             parsed, _ = await ai.generate_json(
@@ -1900,9 +1498,6 @@ class JDService:
             return self._fallback_jd(
                 text
             )
-    # ==========================================================
-    # FALLBACK JD
-    # ==========================================================
 
     def _fallback_jd(
         self,
@@ -1934,8 +1529,7 @@ class JDService:
         found = [
             skill
             for skill in common
-            if skill.lower()
-            in lower
+            if skill.lower() in lower
         ]
 
         return StructuredJD(

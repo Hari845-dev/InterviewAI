@@ -10,23 +10,29 @@ from app.routers import api, auth
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(
+    app: FastAPI,
+):
     await connect_db()
+
     try:
         await ensure_indexes()
     except Exception:
         pass
+
     yield
+
     await close_db()
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
     app = FastAPI(
         title="AI Interview Intelligence Platform",
         description=(
-            "Resume-grounded, job-aware interview preparation platform. "
-            "Swagger UI exposes the authentication, resume, JD, aptitude, and session APIs."
+            "Resume-grounded, job-aware interview "
+            "preparation platform."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -34,30 +40,95 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         openapi_url="/openapi.json",
         openapi_tags=[
-            {"name": "auth", "description": "Authentication and user identity APIs."},
-            {"name": "api", "description": "Core interview, resume, JD, aptitude, and dashboard APIs."},
+            {
+                "name": "auth",
+                "description": (
+                    "Authentication and user identity APIs."
+                ),
+            },
+            {
+                "name": "api",
+                "description": (
+                    "Core interview, resume, JD, "
+                    "aptitude, and dashboard APIs."
+                ),
+            },
         ],
     )
 
+    # ==========================================================
+    # SECURITY HEADERS
+    # ==========================================================
+
     @app.middleware("http")
-    async def add_security_headers(request: Request, call_next):
-        response = await call_next(request)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    async def add_security_headers(
+        request: Request,
+        call_next,
+    ):
+        response = await call_next(
+            request
+        )
+
+        response.headers.setdefault(
+            "X-Content-Type-Options",
+            "nosniff",
+        )
+
+        response.headers.setdefault(
+            "X-Frame-Options",
+            "DENY",
+        )
+
+        response.headers.setdefault(
+            "Referrer-Policy",
+            "strict-origin-when-cross-origin",
+        )
+
         if request.url.scheme == "https":
-            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+
         return response
+
+    # ==========================================================
+    # CORS
+    # ==========================================================
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=[
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "OPTIONS",
+        ],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "Origin",
+            "X-Requested-With",
+        ],
     )
-    app.include_router(auth.router)
-    app.include_router(api.router)
+
+    # ==========================================================
+    # ROUTERS
+    # ==========================================================
+
+    app.include_router(
+        auth.router
+    )
+
+    app.include_router(
+        api.router
+    )
+
     return app
 
 
